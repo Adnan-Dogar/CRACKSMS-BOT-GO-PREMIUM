@@ -129,7 +129,7 @@ func (s *Service) send(job domain.DeliveryJob) error {
 		return fmt.Errorf("bot instance %d is not running", job.BotInstanceID)
 	}
 	forUser := job.TargetKind == "user"
-	body := themes.Format(job.Event, job.ThemeID, forUser, job.OTPVisibility)
+	body := premium.AnimateHTML(themes.Format(job.Event, job.ThemeID, forUser, job.OTPVisibility))
 	message := tgbotapi.NewMessage(job.TargetID, body)
 	message.ParseMode = tgbotapi.ModeHTML
 	message.DisableWebPagePreview = true
@@ -144,7 +144,7 @@ func (s *Service) send(job domain.DeliveryJob) error {
 }
 
 func FormatMessage(event domain.OTPEvent, forUser bool) string {
-	return themes.Format(event, 0, forUser, "visible")
+	return premium.AnimateHTML(themes.Format(event, 0, forUser, "visible"))
 }
 
 func OTPKeyboard(code, channelURL, numberBotURL string) premium.InlineKeyboard {

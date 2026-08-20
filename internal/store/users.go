@@ -76,7 +76,44 @@ type CatalogCountry struct {
 	Available   int
 }
 
+type Withdrawal struct {
+	ID        int64
+	UserID    int64
+	Method    string
+	AmountPKR float64
+	AmountUSD float64
+	Details   string
+	State     string
+}
+
+func (s *Store) ListPendingWithdrawals(ctx context.Context, botInstanceID int64, limit int) ([]Withdrawal, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 25
+	}
+	rows, err := s.pool.Query(ctx, `SELECT w.id,w.user_id,w.method,w.amount_pkr,w.amount_usd,w.details,w.state
+		FROM withdrawals w WHERE w.bot_instance_id=$1 AND w.state='pending' AND EXISTS(
+			SELECT 1 FROM bot_instance_users iu WHERE iu.bot_instance_id=w.bot_instance_id AND iu.user_id=w.user_id)
+		ORDER BY w.created_at,w.id LIMIT $2`, instanceID(botInstanceID), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Withdrawal
+	for rows.Next() {
+		var item Withdrawal
+		if err := rows.Scan(&item.ID, &item.UserID, &item.Method, &item.AmountPKR, &item.AmountUSD, &item.Details, &item.State); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) CreateWithdrawal(ctx context.Context, userID int64, method string, amountPKR, amountUSD float64, details string) (int64, error) {
+	return s.CreateWithdrawalForInstance(ctx, MainBotInstanceID, userID, method, amountPKR, amountUSD, details)
+}
+
+func (s *Store) CreateWithdrawalForInstance(ctx context.Context, botInstanceID, userID int64, method string, amountPKR, amountUSD float64, details string) (int64, error) {
 	if amountPKR <= 0 && amountUSD <= 0 {
 		return 0, errors.New("withdrawal amount must be positive")
 	}
@@ -93,8 +130,8 @@ func (s *Store) CreateWithdrawal(ctx context.Context, userID int64, method strin
 		return 0, errors.New("insufficient balance")
 	}
 	var id int64
-	if err := tx.QueryRow(ctx, `INSERT INTO withdrawals(user_id,method,amount_pkr,amount_usd,details)
-		VALUES($1,$2,$3,$4,$5) RETURNING id`, userID, method, amountPKR, amountUSD, details).Scan(&id); err != nil {
+	if err := tx.QueryRow(ctx, `INSERT INTO withdrawals(bot_instance_id,user_id,method,amount_pkr,amount_usd,details)
+		VALUES($1,$2,$3,$4,$5,$6) RETURNING id`, instanceID(botInstanceID), userID, method, amountPKR, amountUSD, details).Scan(&id); err != nil {
 		return 0, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE users SET balance_pkr=balance_pkr-$2,balance_usd=balance_usd-$3 WHERE id=$1`, userID, amountPKR, amountUSD); err != nil {
@@ -116,6 +153,10 @@ func (s *Store) CreateWithdrawal(ctx context.Context, userID int64, method strin
 }
 
 func (s *Store) ResolveWithdrawal(ctx context.Context, id, adminID int64, approve bool) error {
+	return s.ResolveWithdrawalForInstance(ctx, MainBotInstanceID, id, adminID, approve)
+}
+
+func (s *Store) ResolveWithdrawalForInstance(ctx context.Context, botInstanceID, id, adminID int64, approve bool) error {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return err
@@ -124,7 +165,7 @@ func (s *Store) ResolveWithdrawal(ctx context.Context, id, adminID int64, approv
 	var userID int64
 	var pkr, usd float64
 	if err := tx.QueryRow(ctx, `SELECT user_id,amount_pkr,amount_usd FROM withdrawals
-		WHERE id=$1 AND state='pending' FOR UPDATE`, id).Scan(&userID, &pkr, &usd); err != nil {
+		WHERE bot_instance_id=$1 AND id=$2 AND state='pending' FOR UPDATE`, instanceID(botInstanceID), id).Scan(&userID, &pkr, &usd); err != nil {
 		return err
 	}
 	state := "approved"
@@ -145,7 +186,7 @@ func (s *Store) ResolveWithdrawal(ctx context.Context, id, adminID int64, approv
 			return err
 		}
 	}
-	if _, err := tx.Exec(ctx, `UPDATE withdrawals SET state=$2,resolved_at=now(),resolved_by=$3 WHERE id=$1`, id, state, adminID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE withdrawals SET state=$3,resolved_at=now(),resolved_by=$4 WHERE bot_instance_id=$1 AND id=$2`, instanceID(botInstanceID), id, state, adminID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

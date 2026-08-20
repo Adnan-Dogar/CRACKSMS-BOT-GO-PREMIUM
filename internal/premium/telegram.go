@@ -1,10 +1,5 @@
 package premium
 
-import (
-	"fmt"
-	"html"
-)
-
 // IDs are carried forward from the OTP-BOT-PRO Go base. Telegram clients that
 // cannot render custom emoji display the fallback character inside the tag.
 var emojiIDs = map[string]string{
@@ -29,14 +24,21 @@ var emojiIDs = map[string]string{
 	"premium":   "5436113877181941026",
 	"admin":     "5379774506432444529",
 	"bot":       "5377474517305876998",
+	"copy":      "5359735404426468588",
+	"fire":      "5773906538459573336",
+	"bolt":      "5461151367559362727",
+	"crown":     "5392399685018067802",
+	"diamond":   "5471952986970267163",
+	"key":       "5472211234521076011",
+	"shield":    "5359311622483678195",
+	"rocket":    "5395303611011550609",
+	"bell":      "5359766118363525030",
+	"globe":     "5359831736784843489",
 }
 
 func Emoji(name, fallback string) string {
 	id := emojiIDs[name]
-	if id == "" {
-		return html.EscapeString(fallback)
-	}
-	return fmt.Sprintf(`<tg-emoji emoji-id="%s">%s</tg-emoji>`, id, html.EscapeString(fallback))
+	return CustomEmoji(id, fallback)
 }
 
 func ID(name string) string { return emojiIDs[name] }

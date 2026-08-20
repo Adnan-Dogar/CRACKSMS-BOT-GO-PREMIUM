@@ -220,7 +220,7 @@ func (a *App) handleServices(ctx context.Context, chatID int64) {
 		}
 	}
 	text.WriteString("\nUse <code>/getnumber Service|Country</code>")
-	a.sendHTML(chatID, text.String(), nil)
+	a.sendHTML(chatID, text.String(), servicesMenu(catalog))
 }
 
 func (a *App) handleGetNumber(ctx context.Context, message *tgbotapi.Message, args string) {
@@ -259,7 +259,25 @@ func (a *App) handleGetNumber(ctx context.Context, message *tgbotapi.Message, ar
 	}
 	fmt.Fprintf(&text, "\n⏳ Expires: <b>%s</b>\nNumbers with no OTP return automatically; the first valid OTP consumes its number.",
 		assignment.ExpiresAt.In(a.location).Format("03:04:05 PM"))
-	a.sendHTML(message.Chat.ID, text.String(), nil)
+	serviceIndex, countryIndex := -1, -1
+	for i, service := range store.SortedServices(catalog) {
+		if service != parts[0] {
+			continue
+		}
+		serviceIndex = i
+		for j, item := range catalog[service] {
+			if strings.EqualFold(item.Country, parts[1]) {
+				countryIndex = j
+				break
+			}
+		}
+		break
+	}
+	var markup any = userBackMenu()
+	if serviceIndex >= 0 && countryIndex >= 0 {
+		markup = assignmentMenu(serviceIndex, countryIndex)
+	}
+	a.sendHTML(message.Chat.ID, text.String(), markup)
 }
 
 func (a *App) handleBalance(ctx context.Context, chatID, userID int64) {
@@ -268,7 +286,7 @@ func (a *App) handleBalance(ctx context.Context, chatID, userID int64) {
 		a.sendError(chatID, err)
 		return
 	}
-	a.sendHTML(chatID, fmt.Sprintf("👤 <b>My Account</b>\n\n🔐 Total OTPs: <b>%d</b>\n💵 PKR balance: <b>%.2f</b>\n💲 USD balance: <b>%.4f</b>", total, pkr, usd), nil)
+	a.sendHTML(chatID, fmt.Sprintf("👤 <b>My Account</b>\n\n🔐 Total OTPs: <b>%d</b>\n💵 PKR balance: <b>%.2f</b>\n💲 USD balance: <b>%.4f</b>", total, pkr, usd), profileMenu())
 }
 
 func (a *App) handleTop(ctx context.Context, chatID int64) {
@@ -286,7 +304,7 @@ func (a *App) handleTop(ctx context.Context, chatID int64) {
 		}
 		fmt.Fprintf(&text, "%d. %s — %d OTPs\n", i+1, html.EscapeString(name), user.TotalOTPs)
 	}
-	a.sendHTML(chatID, text.String(), nil)
+	a.sendHTML(chatID, text.String(), userBackMenu())
 }
 
 func (a *App) handleReferral(ctx context.Context, chatID, userID int64) {
@@ -297,7 +315,7 @@ func (a *App) handleReferral(ctx context.Context, chatID, userID int64) {
 	}
 	link := fmt.Sprintf("https://t.me/%s?start=ref%d", a.bot.Self.UserName, userID)
 	a.sendHTML(chatID, fmt.Sprintf("🤝 <b>Referral</b>\n\nLink: %s\nTotal: <b>%d</b>\nQualified: <b>%d</b>\nEarned: <b>%.2f PKR</b>",
-		html.EscapeString(link), total, qualified, earned), nil)
+		html.EscapeString(link), total, qualified, earned), profileMenu())
 }
 
 func (a *App) handleWithdraw(ctx context.Context, message *tgbotapi.Message, args string) {
@@ -311,7 +329,7 @@ func (a *App) handleWithdraw(ctx context.Context, message *tgbotapi.Message, arg
 		a.sendHTML(message.Chat.ID, "Withdrawal amount must be positive.", nil)
 		return
 	}
-	id, err := a.store.CreateWithdrawal(ctx, message.From.ID, "PKR", amount, 0, parts[1])
+	id, err := a.store.CreateWithdrawalForInstance(ctx, a.botInstanceID, message.From.ID, "PKR", amount, 0, parts[1])
 	if err != nil {
 		a.sendError(message.Chat.ID, err)
 		return
@@ -532,7 +550,7 @@ func (a *App) handleAdminCommand(ctx context.Context, message *tgbotapi.Message,
 	case "withdrawapprove", "withdrawreject":
 		id, err := strconv.ParseInt(args, 10, 64)
 		if err == nil {
-			err = a.store.ResolveWithdrawal(ctx, id, message.From.ID, command == "withdrawapprove")
+			err = a.store.ResolveWithdrawalForInstance(ctx, a.botInstanceID, id, message.From.ID, command == "withdrawapprove")
 		}
 		a.respondAdminResult(message.Chat.ID, "Withdrawal resolved.", err)
 		return true
@@ -601,6 +619,11 @@ func (a *App) handleDocument(ctx context.Context, message *tgbotapi.Message, adm
 		a.sendHTML(message.Chat.ID, "Only admins can import number files.", nil)
 		return
 	}
+	allowed, err := a.store.HasAdminPermission(ctx, a.botInstanceID, message.From.ID, "manage_settings")
+	if err != nil || !allowed {
+		a.sendHTML(message.Chat.ID, "🚫 You do not have permission to import number files.", nil)
+		return
+	}
 	args := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(message.Caption), "/addnumbers"))
 	parts := splitExact(args, "|", 6)
 	if len(parts) != 6 {
@@ -660,7 +683,7 @@ func (a *App) listGroups(ctx context.Context, chatID int64) {
 			text.WriteString("Error: " + html.EscapeString(group.LastError) + "\n")
 		}
 	}
-	a.sendHTML(chatID, text.String(), nil)
+	a.sendHTML(chatID, text.String(), adminGroupsMenu(groups))
 }
 
 func (a *App) setRewards(ctx context.Context, message *tgbotapi.Message, args string) {
@@ -721,7 +744,7 @@ func (a *App) listRewards(ctx context.Context, chatID int64) {
 			fmt.Fprintf(&text, "• %d OTP = %.2f PKR extra\n", rule.Threshold, rule.AmountPKR)
 		}
 	}
-	a.sendHTML(chatID, text.String(), nil)
+	a.sendHTML(chatID, text.String(), adminRewardsMenu(schedules))
 }
 
 func (a *App) addPanel(ctx context.Context, message *tgbotapi.Message, args string) {
@@ -791,7 +814,7 @@ func (a *App) listPanels(ctx context.Context, chatID int64) {
 			text.WriteString("Error: " + html.EscapeString(panel.LastError) + "\n")
 		}
 	}
-	a.sendHTML(chatID, text.String(), nil)
+	a.sendHTML(chatID, text.String(), adminPanelMenu(report))
 }
 
 func (a *App) broadcast(ctx context.Context, adminChatID int64, text string) {
@@ -805,7 +828,7 @@ func (a *App) broadcast(ctx context.Context, adminChatID int64, text string) {
 		if ctx.Err() != nil {
 			return
 		}
-		message := tgbotapi.NewMessage(id, text)
+		message := tgbotapi.NewMessage(id, premium.AnimateHTML(text))
 		message.ParseMode = tgbotapi.ModeHTML
 		if _, err := a.bot.Send(message); err != nil {
 			failed++
@@ -867,6 +890,9 @@ func (a *App) handleCallback(ctx context.Context, callback *tgbotapi.CallbackQue
 	}
 	chatID := callback.Message.Chat.ID
 	admin, _ := a.store.HasAnyAdminRole(ctx, a.botInstanceID, callback.From.ID)
+	if a.handleStyledCallback(ctx, callback, admin) {
+		return
+	}
 	if strings.HasPrefix(callback.Data, "admin:") {
 		permission := map[string]string{
 			"admin:panels": "manage_panels", "admin:groups": "manage_groups", "admin:analytics": "view_analytics",
@@ -909,7 +935,7 @@ func (a *App) handleCallback(ctx context.Context, callback *tgbotapi.CallbackQue
 	case callback.Data == "menu:help":
 		a.handleHelp(chatID, admin)
 	case callback.Data == "menu:full":
-		a.sendHTML(chatID, "📖 <b>Full Menu</b>", fullMenu(admin, a.isMain))
+		a.sendHTML(chatID, "📖 <b>Full Menu</b>", fullMenu(admin, a.isMain, a.links))
 	case callback.Data == "menu:compact":
 		a.sendHTML(chatID, "🏠 <b>Main Menu</b>", compactMenu(admin, a.isMain))
 	case callback.Data == "menu:admin":
@@ -945,7 +971,7 @@ func (a *App) handleCallback(ctx context.Context, callback *tgbotapi.CallbackQue
 }
 
 func (a *App) sendHTML(chatID int64, text string, markup any) {
-	message := tgbotapi.NewMessage(chatID, text)
+	message := tgbotapi.NewMessage(chatID, premium.AnimateHTML(text))
 	message.ParseMode = tgbotapi.ModeHTML
 	message.DisableWebPagePreview = true
 	message.ReplyMarkup = markup

@@ -19,6 +19,11 @@ func TestAllTenThemesRenderPremiumMarkup(t *testing.T) {
 		if !strings.Contains(body, "123456") {
 			t.Fatalf("theme %d did not render the OTP", id)
 		}
+		for _, customID := range []string{"5334998226636390258", "5224637061985742245"} {
+			if !strings.Contains(body, `emoji-id="`+customID+`"`) {
+				t.Fatalf("theme %d is missing premium app/country emoji %s: %s", id, customID, body)
+			}
+		}
 		raw, err := json.Marshal(Keyboard(event, id, Links{
 			Channel: "https://t.me/community", NumberBot: "https://t.me/numbers",
 			Developer: "https://t.me/developer", Support: "https://t.me/support",

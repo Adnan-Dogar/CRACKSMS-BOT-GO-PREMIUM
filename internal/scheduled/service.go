@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/adnan-dogar/cracksms-vnext/internal/delivery"
 	"github.com/adnan-dogar/cracksms-vnext/internal/domain"
+	"github.com/adnan-dogar/cracksms-vnext/internal/premium"
 	"github.com/adnan-dogar/cracksms-vnext/internal/store"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/jackc/pgx/v5"
@@ -77,7 +79,11 @@ func (s *Service) send(ctx context.Context, item domain.ScheduledMessage) error 
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		message := tgbotapi.NewMessage(target, item.Body)
+		body := item.Body
+		if strings.EqualFold(item.ParseMode, tgbotapi.ModeHTML) {
+			body = premium.AnimateHTML(body)
+		}
+		message := tgbotapi.NewMessage(target, body)
 		message.ParseMode = item.ParseMode
 		message.DisableWebPagePreview = true
 		if _, err := bot.Send(message); err != nil {

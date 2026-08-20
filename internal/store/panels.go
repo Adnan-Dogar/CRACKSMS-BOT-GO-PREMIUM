@@ -88,6 +88,14 @@ func (s *Store) SetPanelEnabledForInstance(ctx context.Context, botInstanceID, i
 	return err
 }
 
+func (s *Store) RemovePanelForInstance(ctx context.Context, botInstanceID, id int64) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM panels WHERE bot_instance_id=$1 AND id=$2`, instanceID(botInstanceID), id)
+	if err == nil && tag.RowsAffected() == 0 {
+		return fmt.Errorf("panel %d not found", id)
+	}
+	return err
+}
+
 func (s *Store) UpdatePanelHealth(ctx context.Context, id int64, cursor string, panelErr error) error {
 	if panelErr == nil {
 		_, err := s.pool.Exec(ctx, `UPDATE panels SET healthy=true,consecutive_failures=0,last_cursor=$2,

@@ -63,42 +63,47 @@ func Format(event domain.OTPEvent, themeID int, forUser bool, visibility string)
 	}
 	code, message := privacyText(event.Code, event.Message, visibility)
 	panel := defaultText(event.PanelName, "Unknown")
-	service := country.ServiceEmoji(event.Service) + " " + defaultText(event.Service, "Unknown")
+	serviceName := defaultText(event.Service, "Unknown")
+	service := premium.AppEmoji(event.Service, country.ServiceEmoji(event.Service)) + " " + html.EscapeString(serviceName)
 	location := country.Detect(event.NormalizedPhone)
 	if event.Country != "" {
 		location.Name = event.Country
 	}
 	if location.Name != "" {
-		service += " · " + country.Flag(location.Code) + " " + location.Name
+		service += " · " + premium.CountryFlag(location.Code, country.Flag(location.Code)) + " " + html.EscapeString(location.Name)
+	}
+	plainService := serviceName
+	if location.Name != "" {
+		plainService += " · " + location.Name
 	}
 
 	switch theme.ID {
 	case 1:
-		return fmt.Sprintf("%s <b>%s</b> · <code>%s</code> · <code>%s</code>", theme.Badge, html.EscapeString(service), html.EscapeString(phone), html.EscapeString(code))
+		return fmt.Sprintf("%s <b>%s</b> · <code>%s</code> · <code>%s</code>", theme.Badge, service, html.EscapeString(phone), html.EscapeString(code))
 	case 2:
-		return fmt.Sprintf("%s <b>OTP EVENT</b>\n<pre>panel=%s\nservice=%s\nnumber=%s\ncode=%s</pre>", theme.Badge,
-			html.EscapeString(panel), html.EscapeString(service), html.EscapeString(phone), html.EscapeString(code))
+		return fmt.Sprintf("%s <b>OTP EVENT</b>\n%s\n<pre>panel=%s\nservice=%s\nnumber=%s\ncode=%s</pre>", theme.Badge, service,
+			html.EscapeString(panel), html.EscapeString(plainService), html.EscapeString(phone), html.EscapeString(code))
 	case 3:
-		return fmt.Sprintf("⚡ <b>%s OTP</b> ⚡\n\n📱 <code>%s</code>\n🔑 <code>%s</code>", html.EscapeString(service), html.EscapeString(phone), html.EscapeString(code))
+		return fmt.Sprintf("⚡ <b>%s OTP</b> ⚡\n\n📱 <code>%s</code>\n🔑 <code>%s</code>", service, html.EscapeString(phone), html.EscapeString(code))
 	case 4:
 		return fmt.Sprintf("🔬 <b>TECH OTP SIGNAL</b>\n\n📡 %s\n🧪 %s\n☎️ <code>%s</code>\n🔐 <code>%s</code>\n\n<blockquote>%s</blockquote>",
-			html.EscapeString(panel), html.EscapeString(service), html.EscapeString(phone), html.EscapeString(code), html.EscapeString(message))
+			html.EscapeString(panel), service, html.EscapeString(phone), html.EscapeString(code), html.EscapeString(message))
 	case 5:
 		return fmt.Sprintf("💎 ━━━ <b>PREMIUM OTP</b> ━━━ 💎\n\n%s <b>Panel:</b> %s\n📱 <b>Service:</b> %s\n☎️ <code>%s</code>\n🔑 <b>OTP:</b> <code>%s</code>\n\n<blockquote>%s</blockquote>",
-			premium.Emoji("gold", "✨"), html.EscapeString(panel), html.EscapeString(service), html.EscapeString(phone), html.EscapeString(code), html.EscapeString(message))
+			premium.Emoji("gold", "✨"), html.EscapeString(panel), service, html.EscapeString(phone), html.EscapeString(code), html.EscapeString(message))
 	case 6:
-		return fmt.Sprintf("🎲 <code>%s</code>  •  <code>%s</code>", html.EscapeString(phone), html.EscapeString(code))
+		return fmt.Sprintf("🎲 %s  •  <code>%s</code>  •  <code>%s</code>", service, html.EscapeString(phone), html.EscapeString(code))
 	case 7:
 		return fmt.Sprintf("💼 <b>BUSINESS VERIFICATION</b>\n\n<b>Provider</b>  %s\n<b>Product</b>  %s\n<b>Account</b>  <code>%s</code>\n<b>Code</b>  <code>%s</code>",
-			html.EscapeString(panel), html.EscapeString(service), html.EscapeString(phone), html.EscapeString(code))
+			html.EscapeString(panel), service, html.EscapeString(phone), html.EscapeString(code))
 	case 8:
-		return fmt.Sprintf("🌐 <b>New %s code</b>\n\n👥 <code>%s</code>\n🔑 <code>%s</code>\n\n💬 %s", html.EscapeString(service), html.EscapeString(phone), html.EscapeString(code), html.EscapeString(message))
+		return fmt.Sprintf("🌐 <b>New %s code</b>\n\n👥 <code>%s</code>\n🔑 <code>%s</code>\n\n💬 %s", service, html.EscapeString(phone), html.EscapeString(code), html.EscapeString(message))
 	case 9:
 		return fmt.Sprintf("🌟 ━━━━━ <b>DELUXE OTP</b> ━━━━━ 🌟\n\n📡 <b>Panel:</b> %s\n📱 <b>Service:</b> %s\n☎️ <b>Number:</b> <code>%s</code>\n🔑 <b>OTP:</b> <code>%s</code>\n\n📝 <b>Full message</b>\n<blockquote>%s</blockquote>",
-			html.EscapeString(panel), html.EscapeString(service), html.EscapeString(phone), html.EscapeString(code), html.EscapeString(message))
+			html.EscapeString(panel), service, html.EscapeString(phone), html.EscapeString(code), html.EscapeString(message))
 	default:
 		return fmt.Sprintf("❄️ ━━━━━━━━━━━━━━━━━━ 🧊\n%s <b>New OTP</b>\n\n📡 <b>Panel:</b> %s\n📱 <b>Service:</b> %s\n☎️ <b>Number:</b> <code>%s</code>\n🔑 <b>OTP:</b> <code>%s</code>\n\n💬 <b>Message:</b>\n<blockquote>%s</blockquote>\n❄️ ━━━━━━━━━━━━━━━━━━ 🧊",
-			premium.Emoji("lock", "🔐"), html.EscapeString(panel), html.EscapeString(service), html.EscapeString(phone), html.EscapeString(code), html.EscapeString(message))
+			premium.Emoji("lock", "🔐"), html.EscapeString(panel), service, html.EscapeString(phone), html.EscapeString(code), html.EscapeString(message))
 	}
 }
 

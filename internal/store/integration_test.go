@@ -150,6 +150,44 @@ func TestRewardConsumptionAndRecyclingScenario(t *testing.T) {
 		if err != nil || len(patterns) != 1 {
 			t.Fatalf("patterns=%v err=%v", patterns, err)
 		}
+		admins, err := repo.ListInstanceAdmins(ctx, childID)
+		if err != nil || len(admins) != 1 || admins[0].UserID != 303 {
+			t.Fatalf("tenant admins=%+v err=%v", admins, err)
+		}
+		users, err := repo.ListUsersForInstance(ctx, childID, 25)
+		if err != nil || len(users) != 1 || users[0].UserID != 404 || users[0].Tier != "enterprise" {
+			t.Fatalf("tenant users=%+v err=%v", users, err)
+		}
+		panelID, err := repo.UpsertPanelForInstance(ctx, childID, domain.Panel{
+			Name: "inline-panel", Kind: "token_api", PollInterval: time.Second, Enabled: true,
+			Config: map[string]any{"url": "https://example.invalid/sms"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := repo.RemovePanelForInstance(ctx, childID, panelID); err != nil {
+			t.Fatal(err)
+		}
+		if report, err := repo.PanelHealthReportForInstance(ctx, childID); err != nil || len(report) != 0 {
+			t.Fatalf("removed panel report=%+v err=%v", report, err)
+		}
+		withdrawalID, err := repo.CreateWithdrawalForInstance(ctx, childID, 404, "PKR", 1, 0, "integration")
+		if err != nil {
+			t.Fatal(err)
+		}
+		withdrawals, err := repo.ListPendingWithdrawals(ctx, childID, 25)
+		if err != nil || len(withdrawals) != 1 || withdrawals[0].ID != withdrawalID {
+			t.Fatalf("pending withdrawals=%+v err=%v", withdrawals, err)
+		}
+		if err := repo.ResolveWithdrawalForInstance(ctx, childID, withdrawalID, 303, false); err != nil {
+			t.Fatal(err)
+		}
+		if err := repo.RejectChildBot(ctx, childID, 303, "integration reversal"); err != nil {
+			t.Fatal(err)
+		}
+		if err := repo.ApproveChildBot(ctx, childID, 303, "enterprise"); err != nil {
+			t.Fatalf("reapprove rejected child bot: %v", err)
+		}
 	})
 	t.Run("durable panel ingestion and replay dedup", func(t *testing.T) {
 		panelID, err := repo.UpsertPanel(ctx, domain.Panel{

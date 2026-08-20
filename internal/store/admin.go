@@ -42,6 +42,76 @@ func (s *Store) RemoveAdmin(ctx context.Context, userID int64) error {
 	return err
 }
 
+type InstanceAdmin struct {
+	UserID      int64
+	Username    string
+	FirstName   string
+	Permissions []string
+}
+
+func (s *Store) ListInstanceAdmins(ctx context.Context, botInstanceID int64) ([]InstanceAdmin, error) {
+	botInstanceID = instanceID(botInstanceID)
+	query := `SELECT a.user_id,u.username,u.first_name,a.permissions
+		FROM admins a JOIN users u ON u.id=a.user_id ORDER BY a.user_id`
+	args := []any{}
+	if botInstanceID != MainBotInstanceID {
+		query = `SELECT a.user_id,u.username,u.first_name,a.permissions
+			FROM tenant_admins a JOIN users u ON u.id=a.user_id
+			WHERE a.bot_instance_id=$1 ORDER BY a.user_id`
+		args = append(args, botInstanceID)
+	}
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []InstanceAdmin
+	for rows.Next() {
+		var item InstanceAdmin
+		if err := rows.Scan(&item.UserID, &item.Username, &item.FirstName, &item.Permissions); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+type InstanceUser struct {
+	UserID     int64
+	Username   string
+	FirstName  string
+	Tier       string
+	TotalOTPs  int64
+	BalancePKR float64
+}
+
+func (s *Store) ListUsersForInstance(ctx context.Context, botInstanceID int64, limit int) ([]InstanceUser, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 25
+	}
+	rows, err := s.pool.Query(ctx, `SELECT u.id,u.username,u.first_name,
+		COALESCE(us.tier,'free'),count(e.id),u.balance_pkr
+		FROM bot_instance_users iu JOIN users u ON u.id=iu.user_id
+		LEFT JOIN user_subscriptions us ON us.bot_instance_id=iu.bot_instance_id AND us.user_id=u.id
+			AND us.status='active' AND (us.expires_at IS NULL OR us.expires_at>now())
+		LEFT JOIN otp_events e ON e.bot_instance_id=iu.bot_instance_id AND e.assigned_user_id=u.id AND e.counted
+		WHERE iu.bot_instance_id=$1 GROUP BY u.id,u.username,u.first_name,us.tier,u.balance_pkr
+		ORDER BY count(e.id) DESC,u.id LIMIT $2`, instanceID(botInstanceID), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []InstanceUser
+	for rows.Next() {
+		var item InstanceUser
+		if err := rows.Scan(&item.UserID, &item.Username, &item.FirstName, &item.Tier, &item.TotalOTPs, &item.BalancePKR); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 type RequiredChat struct {
 	BotInstanceID int64
 	ChatID        int64

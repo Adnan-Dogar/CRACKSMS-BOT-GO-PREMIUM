@@ -19,37 +19,74 @@ import (
 
 func compactMenu(admin, isMain bool) premium.InlineKeyboard {
 	rows := [][]premium.InlineButton{
-		{premium.Button("Get Number", "menu:services", "primary", "phone"), premium.Button("My Profile", "menu:profile", "success", "money")},
-		{premium.Button("My Stats", "menu:stats", "primary", "chart"), premium.Button("My History", "menu:history:0", "primary", "history")},
-		{premium.Button("My OTPs", "menu:history:0", "success", "otp"), premium.Button("Premium", "menu:premium", "success", "premium")},
-		{premium.Button("Settings", "menu:settings", "primary", "settings"), premium.Button("More Options", "menu:full", "primary", "link")},
+		{premium.Button("Get Number", "menu:services", "success", "phone")},
 	}
 	if isMain {
 		rows = append(rows, []premium.InlineButton{premium.Button("Create My Bot", "menu:createbot", "success", "bot")})
+	} else {
+		rows = append(rows, []premium.InlineButton{premium.Button("My Profile", "menu:profile", "primary", "money")})
 	}
+	rows = append(rows,
+		[]premium.InlineButton{premium.Button("My Stats", "menu:stats", "primary", "chart"), premium.Button("My History", "menu:history:0", "success", "history")},
+		[]premium.InlineButton{premium.Button("My OTPs", "menu:history:0", "danger", "otp"), premium.Button("Premium", "menu:premium", "success", "premium")},
+	)
+	settingsRow := []premium.InlineButton{}
+	if isMain {
+		settingsRow = append(settingsRow, premium.Button("Analytics", "menu:analytics", "primary", "chart"))
+	}
+	settingsRow = append(settingsRow, premium.Button("Settings", "menu:settings", "primary", "settings"))
+	rows = append(rows, settingsRow, []premium.InlineButton{premium.Button("More Options", "menu:full", "primary", "link")})
 	if admin {
 		rows = append(rows, []premium.InlineButton{premium.Button("Admin Dashboard", "menu:admin", "danger", "admin")})
 	}
 	return premium.InlineKeyboard{InlineKeyboard: rows}
 }
 
-func fullMenu(admin, isMain bool) premium.InlineKeyboard {
-	menu := compactMenu(admin, isMain)
-	extra := [][]premium.InlineButton{
-		{premium.Button("Tutorials", "menu:tutorials", "primary", "message"), premium.Button("Analytics", "menu:analytics", "primary", "chart")},
-		{premium.Button("OTP Themes", "menu:themes", "success", "celebrate"), premium.Button("Webhooks", "menu:webhooks", "primary", "link")},
-		{premium.Button("Scheduling", "menu:schedule", "primary", "settings"), premium.Button("API Access", "menu:api", "danger", "developer")},
-		{premium.Button("FAQ & Support", "menu:help", "danger", "support"), premium.Button("Compact Menu", "menu:compact", "primary", "phone")},
+func fullMenu(admin, isMain bool, links themes.Links) premium.InlineKeyboard {
+	rows := compactMenu(false, isMain).InlineKeyboard
+	// Replace the compact menu's final "More" row with the complete navigation.
+	rows = rows[:len(rows)-1]
+	rows = append(rows,
+		[]premium.InlineButton{premium.Button("Tutorials", "menu:tutorials", "primary", "message"), premium.Button("OTP Themes", "menu:themes", "success", "celebrate")},
+		[]premium.InlineButton{premium.Button("Webhooks", "menu:webhooks", "primary", "link"), premium.Button("Scheduling", "menu:schedule", "primary", "settings")},
+		[]premium.InlineButton{premium.Button("API Access", "menu:api", "danger", "developer"), premium.Button("My Bots", "menu:mybots", "primary", "bot")},
+	)
+	var community []premium.InlineButton
+	if isMain && links.Channel != "" {
+		community = append(community, premium.InlineButton{Text: "Channel", URL: links.Channel, Style: "success", IconCustomEmojiID: premium.ID("channel")})
 	}
-	menu.InlineKeyboard = append(menu.InlineKeyboard, extra...)
-	return menu
+	if isMain && links.NumberBot != "" {
+		community = append(community, premium.InlineButton{Text: "Get Numbers", URL: links.NumberBot, Style: "primary", IconCustomEmojiID: premium.ID("number")})
+	}
+	if len(community) > 0 {
+		rows = append(rows, community)
+	}
+	var contacts []premium.InlineButton
+	if links.Developer != "" && isMain {
+		contacts = append(contacts, premium.InlineButton{Text: "Developer", URL: links.Developer, Style: "primary", IconCustomEmojiID: premium.ID("developer")})
+	}
+	if links.Support != "" {
+		contacts = append(contacts, premium.InlineButton{Text: "Support", URL: links.Support, Style: "danger", IconCustomEmojiID: premium.ID("support")})
+	}
+	if len(contacts) > 0 {
+		rows = append(rows, contacts)
+	}
+	rows = append(rows, []premium.InlineButton{premium.Button("Help", "menu:help", "primary", "support"), premium.Button("Compact Menu", "menu:compact", "primary", "phone")})
+	if admin {
+		rows = append(rows, []premium.InlineButton{premium.Button("Admin Dashboard", "menu:admin", "danger", "admin")})
+	}
+	return premium.InlineKeyboard{InlineKeyboard: rows}
 }
 
 func adminDashboard() premium.InlineKeyboard {
 	return premium.InlineKeyboard{InlineKeyboard: [][]premium.InlineButton{
-		{premium.Button("Panels", "admin:panels", "primary", "chart"), premium.Button("OTP Groups", "admin:groups", "primary", "channel")},
-		{premium.Button("Analytics", "admin:analytics", "success", "gold"), premium.Button("Rewards", "admin:rewards", "success", "money")},
-		{premium.Button("Child Bots", "admin:bots", "primary", "bot"), premium.Button("Tutorials", "admin:tutorials", "primary", "message")},
+		{premium.Button("Numbers", "admin:numbers", "primary", "phone"), premium.Button("Broadcast", "admin:broadcast", "danger", "channel")},
+		{premium.Button("Statistics", "admin:analytics", "success", "chart"), premium.Button("Users & Tiers", "admin:users", "primary", "premium")},
+		{premium.Button("Panels", "admin:panels", "primary", "chart"), premium.Button("OTP Groups", "admin:groups", "success", "channel")},
+		{premium.Button("Rewards", "admin:rewards", "success", "money"), premium.Button("Withdrawals", "admin:withdrawals", "danger", "money")},
+		{premium.Button("Child Bots", "admin:bots", "primary", "bot"), premium.Button("Admins", "admin:admins", "danger", "admin")},
+		{premium.Button("Required Chats", "admin:required", "primary", "lock"), premium.Button("OTP Patterns", "admin:patterns", "primary", "otp")},
+		{premium.Button("Tutorials", "admin:tutorials", "primary", "message"), premium.Button("Settings", "admin:settings", "primary", "settings")},
 		{premium.Button("Help", "menu:help", "danger", "support"), premium.Button("Main Menu", "menu:compact", "primary", "phone")},
 	}}
 }
@@ -201,6 +238,8 @@ func (a *App) handlePremium(ctx context.Context, chatID, userID int64) {
 		strings.ToUpper(tier), store.TierPanelLimit(tier), strings.Join(features, "\n✅ "))
 	a.sendHTML(chatID, text, premium.InlineKeyboard{InlineKeyboard: [][]premium.InlineButton{{
 		premium.Button("Analytics", "menu:analytics", "primary", "chart"), premium.Button("Themes", "menu:themes", "success", "celebrate"),
+	}, {
+		premium.Button("Main Menu", "menu:compact", "primary", "phone"),
 	}}})
 }
 
@@ -210,12 +249,14 @@ func (a *App) handleAnalytics(ctx context.Context, chatID, userID int64) {
 		a.sendHTML(chatID, "📊 Advanced analytics require the <b>Pro</b> or <b>Enterprise</b> tier.", nil)
 		return
 	}
-	a.sendAnalytics(ctx, chatID)
+	a.sendAnalytics(ctx, chatID, false)
 }
 
-func (a *App) handleAnalyticsAdmin(ctx context.Context, chatID int64) { a.sendAnalytics(ctx, chatID) }
+func (a *App) handleAnalyticsAdmin(ctx context.Context, chatID int64) {
+	a.sendAnalytics(ctx, chatID, true)
+}
 
-func (a *App) sendAnalytics(ctx context.Context, chatID int64) {
+func (a *App) sendAnalytics(ctx context.Context, chatID int64, admin bool) {
 	data, err := a.store.Analytics(ctx, a.botInstanceID)
 	if err != nil {
 		a.sendError(chatID, err)
@@ -225,7 +266,14 @@ func (a *App) sendAnalytics(ctx context.Context, chatID int64) {
 		data.Users, data.ActiveUsers24H, data.TotalOTPs, data.CountedOTPs, data.OTPsToday,
 		data.AvailableNumbers, data.AssignedNumbers, data.ActivePanels, data.TotalPanels,
 		data.DeliveryPending, data.DeliveryFailed, data.WebhookPending, data.ScheduledPending)
-	a.sendHTML(chatID, text, nil)
+	markup := userBackMenu()
+	if admin {
+		markup = premium.InlineKeyboard{InlineKeyboard: [][]premium.InlineButton{
+			{premium.Button("Panels", "admin:panels", "primary", "chart"), premium.Button("OTP Groups", "admin:groups", "success", "channel")},
+			{premium.Button("Admin Home", "menu:admin", "primary", "admin")},
+		}}
+	}
+	a.sendHTML(chatID, text, markup)
 }
 
 func (a *App) handleWebhook(ctx context.Context, message *tgbotapi.Message, args string) {
@@ -413,7 +461,7 @@ func (a *App) sendTutorial(ctx context.Context, chatID, id int64) {
 		a.sendError(chatID, err)
 		return
 	}
-	caption := fmt.Sprintf("📚 <b>%s</b>\n\n%s\n\n%s", html.EscapeString(item.Title), html.EscapeString(item.Description), item.Body)
+	caption := premium.AnimateHTML(fmt.Sprintf("📚 <b>%s</b>\n\n%s\n\n%s", html.EscapeString(item.Title), html.EscapeString(item.Description), item.Body))
 	switch item.ContentType {
 	case "photo":
 		media := tgbotapi.NewPhoto(chatID, tgbotapi.FileID(item.MediaFileID))
@@ -438,8 +486,8 @@ func (a *App) handleSettings(ctx context.Context, chatID, userID int64) {
 		return
 	}
 	theme, _ := a.store.EffectiveTheme(ctx, a.botInstanceID, userID)
-	a.sendHTML(chatID, fmt.Sprintf("⚙️ <b>Settings</b>\n\n🎨 OTP theme: <b>T%d · %s</b>\n🌐 Language: <b>%s</b>\n🕓 Time zone: <b>%s</b>\n📋 Menu: <b>%s</b>\n\nUse <code>/theme 0-9</code> to change your theme.",
-		theme, themes.Get(theme).Name, html.EscapeString(pref.Language), html.EscapeString(pref.Timezone), map[bool]string{true: "compact", false: "full"}[pref.CompactMenu]), nil)
+	a.sendHTML(chatID, fmt.Sprintf("⚙️ <b>Settings</b>\n\n🎨 OTP theme: <b>T%d · %s</b>\n🌐 Language: <b>%s</b>\n🕓 Time zone: <b>%s</b>\n📋 Menu: <b>%s</b>\n\nUse the premium controls below or <code>/theme 0-9</code>.",
+		theme, themes.Get(theme).Name, html.EscapeString(pref.Language), html.EscapeString(pref.Timezone), map[bool]string{true: "compact", false: "full"}[pref.CompactMenu]), settingsMenu())
 }
 
 var childTokenPattern = regexp.MustCompile(`^[0-9]{6,14}:[A-Za-z0-9_-]{30,}$`)
@@ -475,7 +523,7 @@ func (a *App) handleMyBots(ctx context.Context, chatID, ownerID int64) {
 	for _, item := range items {
 		fmt.Fprintf(&text, "\n#%d · %s · %s\nTier: %s · @%s\n", item.ID, html.EscapeString(item.Name), item.Status, item.Tier, html.EscapeString(item.Username))
 	}
-	a.sendHTML(chatID, text.String(), nil)
+	a.sendHTML(chatID, text.String(), userBackMenu())
 }
 
 func (a *App) adminSetTier(ctx context.Context, message *tgbotapi.Message, args string) {
@@ -537,7 +585,7 @@ func (a *App) adminListBots(ctx context.Context, chatID int64) {
 			fmt.Fprintf(&text, "Error: %s\n", html.EscapeString(item.LastError))
 		}
 	}
-	a.sendHTML(chatID, text.String(), nil)
+	a.sendHTML(chatID, text.String(), adminBotsMenu(items))
 }
 
 func (a *App) adminApproveBot(ctx context.Context, message *tgbotapi.Message, args string) {
@@ -618,7 +666,7 @@ func (a *App) adminListPatterns(ctx context.Context, chatID int64) {
 	for _, pattern := range patterns {
 		fmt.Fprintf(&text, "\n#%d · <b>%s</b>\n<code>%s</code>\n", pattern.ID, html.EscapeString(pattern.Name), html.EscapeString(pattern.Pattern))
 	}
-	a.sendHTML(chatID, text.String(), nil)
+	a.sendHTML(chatID, text.String(), adminPatternsMenu(patterns))
 }
 
 func activeMark(active bool) string {

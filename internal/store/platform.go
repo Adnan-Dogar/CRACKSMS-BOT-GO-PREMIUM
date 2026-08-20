@@ -258,7 +258,7 @@ func (s *Store) ApproveChildBot(ctx context.Context, id, adminID int64, tier str
 	defer tx.Rollback(ctx)
 	var owner int64
 	err = tx.QueryRow(ctx, `UPDATE bot_instances SET tier=$2,status='approved',enabled=true,approved_at=now(),approved_by=$3,last_error=''
-		WHERE id=$1 AND NOT is_main AND status IN ('pending','stopped','error') RETURNING owner_user_id`, id, tier, adminID).Scan(&owner)
+		WHERE id=$1 AND NOT is_main AND status IN ('pending','stopped','rejected','error') RETURNING owner_user_id`, id, tier, adminID).Scan(&owner)
 	if err != nil {
 		return err
 	}

@@ -2,14 +2,17 @@
 
 Modular Go rewrite of the authorized SMS/OTP management bots. The service uses PostgreSQL as its source of truth, persistently deduplicates provider events, queues Telegram deliveries, credits cumulative daily rewards exactly once, and safely recycles no-OTP numbers.
 
-The behavioral baseline is the legacy Go monolith in `../OTP-BOT-PRO/Copy of Copy of main.go`; vNext preserves its user-facing ideas while separating Telegram, panels, OTP processing, delivery, rewards, storage, scheduling, security, and monitoring into modules.
+The behavioral baselines are [CRACKSMSBOTV2](https://github.com/Adnan-Dogar/CRACKSMSBOTV2), [CRACKSMSBOT](https://github.com/Adnan-Dogar/CRACKSMSBOT), and [OTP-BOT-PRO](https://github.com/Adnan-Dogar/OTP-BOT-PRO). vNext preserves their user-facing ideas while separating Telegram, panels, OTP processing, delivery, rewards, storage, scheduling, security, and monitoring into modules.
 
 ## Implemented behavior
 
 - Dynamic OTP destination groups with independently configurable buttons.
 - Per-group OTP privacy (`visible`, `masked`, or `hidden`), button mode, and theme override. Visible mode keeps the earlier full-code behavior; hidden mode redacts the code from both the body and buttons.
-- Ten complete OTP themes (Classic, Minimal, Developer, Electric, Tech, Premium, UltraMinimal, Business, Social, and Deluxe) with country/service detection.
-- Shared premium button builders carry Telegram `primary`, `success`, `danger`, `copy_text`, and custom-emoji fields across user/admin/theme interfaces.
+- Ten complete OTP themes (Classic, Minimal, Developer, Electric, Tech, Premium, UltraMinimal, Business, Social, and Deluxe) with animated country/service detection.
+- The original CrackSMS animated country-flag, service/app, and UI custom-emoji ID catalogs are ported with Unicode fallbacks.
+- An HTML-safe renderer emits `<tg-emoji emoji-id="…">fallback</tg-emoji>` in bot UI, OTP, broadcast, daily-summary, tutorial, and scheduled HTML messages without nesting existing custom emoji or modifying code blocks.
+- Shared premium button builders carry Telegram `primary`, `success`, `danger`, `copy_text`, and `icon_custom_emoji_id` fields across user/admin/theme interfaces.
+- Styled compact/full menus, dynamic service/country selection, and permission-gated admin submenus cover panels, groups, inventory, rewards, users/tiers, withdrawals, admins, required chats, patterns, child bots, tutorials, settings, analytics, and broadcasts.
 - The first deduplicated OTP for an assigned number consumes that number and counts once for earnings/rewards.
 - Numbers without an OTP return to the same service/country after 20 minutes.
 - A returned number is immediately available to other users but excluded from its previous user for 24 hours.
@@ -24,7 +27,7 @@ The behavioral baseline is the legacy Go monolith in `../OTP-BOT-PRO/Copy of Cop
 - Encrypted child-bot requests, admin approval/tier selection, isolated bot/group/panel/admin configuration, runtime supervision, and automatic restart reconciliation.
 - Built-in multilingual/formatted OTP extraction plus safe Enterprise custom RE2 patterns.
 - Encrypted panel configuration using AES-256-GCM.
-- Telegram premium custom-emoji IDs from the Go baseline plus Bot API button styles (`primary`, `success`, and `danger`). Older Telegram clients may show normal fallback emoji/colors, while current clients receive the enhanced markup.
+- Telegram premium custom-emoji IDs from all supplied baselines plus Bot API button styles (`primary`, `success`, and `danger`). Older Telegram clients may show normal fallback emoji/colors, while current clients receive the enhanced markup.
 - Protected health/readiness/metrics endpoints and graceful shutdown.
 
 The old repositories remain untouched and are used only as migration/behavioral references.

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/adnan-dogar/cracksms-vnext/internal/premium"
 	"github.com/adnan-dogar/cracksms-vnext/internal/store"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -73,7 +74,7 @@ func (s *Scheduler) runDailySummaries(ctx context.Context) {
 			text := fmt.Sprintf("📊 <b>Daily Summary</b>\n\n📅 %s\n🔐 OTPs: <b>%d</b>\n💵 OTP earnings: <b>%.2f PKR</b>\n🎁 Rewards: <b>%.2f PKR</b>\n💰 Total: <b>%.2f PKR</b>",
 				date.Format("02 January 2006"), summary.OTPCount, summary.BasePKR, summary.RewardPKR,
 				summary.BasePKR+summary.RewardPKR)
-			message := tgbotapi.NewMessage(summary.UserID, text)
+			message := tgbotapi.NewMessage(summary.UserID, premium.AnimateHTML(text))
 			message.ParseMode = tgbotapi.ModeHTML
 			if _, err := s.bot.Send(message); err != nil {
 				slog.Warn("daily summary delivery failed", "user_id", summary.UserID, "error", err)
