@@ -73,6 +73,24 @@ func TestRewardConsumptionAndRecyclingScenario(t *testing.T) {
 		if err := repo.SetUserTheme(ctx, childID, 404, 3); err != nil {
 			t.Fatal(err)
 		}
+		if err := repo.UpsertServiceProfile(ctx, childID, 303, "TenantService", "5334998226636390258"); err != nil {
+			t.Fatal(err)
+		}
+		flow := store.TelegramFlow{Kind: "number_import", Step: "service", Data: map[string]string{"secret": "flow-secret"}, ExpiresAt: time.Now().Add(time.Minute)}
+		if err := repo.SetTelegramFlow(ctx, childID, 404, flow); err != nil {
+			t.Fatal(err)
+		}
+		loadedFlow, err := repo.TelegramFlow(ctx, childID, 404)
+		if err != nil || loadedFlow.Data["secret"] != "flow-secret" {
+			t.Fatalf("interactive flow=%+v err=%v", loadedFlow, err)
+		}
+		var rawFlow string
+		if err := pool.QueryRow(ctx, `SELECT data_config::text FROM telegram_flows WHERE bot_instance_id=$1 AND user_id=$2`, childID, 404).Scan(&rawFlow); err != nil || strings.Contains(rawFlow, "flow-secret") {
+			t.Fatalf("flow was not encrypted raw=%q err=%v", rawFlow, err)
+		}
+		if err := repo.ClearTelegramFlow(ctx, childID, 404); err != nil {
+			t.Fatal(err)
+		}
 		groupTheme := 5
 		if err := repo.UpsertOTPGroupForInstance(ctx, childID, domain.OTPGroupDestination{
 			ChatID: -100404, Title: "Private Log", ButtonsEnabled: true, Enabled: true,
@@ -82,6 +100,10 @@ func TestRewardConsumptionAndRecyclingScenario(t *testing.T) {
 		}
 		if _, err := repo.AddNumbers(ctx, "TenantService", "TenantCountry", "TC", 2, 0, 1, []string{"923119999999"}); err != nil {
 			t.Fatal(err)
+		}
+		catalog, err := repo.CatalogForInstance(ctx, childID)
+		if err != nil || len(catalog["TenantService"]) != 1 || catalog["TenantService"][0].CustomEmojiID != "5334998226636390258" {
+			t.Fatalf("tenant service catalog=%+v err=%v", catalog, err)
 		}
 		assignment, err := repo.AssignNumbersForInstance(ctx, childID, 404, "TenantService", "TenantCountry", 1, 20*time.Minute)
 		if err != nil {
@@ -165,11 +187,49 @@ func TestRewardConsumptionAndRecyclingScenario(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		loadedPanel, err := repo.PanelForInstance(ctx, childID, panelID)
+		if err != nil || loadedPanel.Config["url"] != "https://example.invalid/sms" {
+			t.Fatalf("loaded panel=%+v err=%v", loadedPanel, err)
+		}
 		if err := repo.RemovePanelForInstance(ctx, childID, panelID); err != nil {
 			t.Fatal(err)
 		}
 		if report, err := repo.PanelHealthReportForInstance(ctx, childID); err != nil || len(report) != 0 {
 			t.Fatalf("removed panel report=%+v err=%v", report, err)
+		}
+		accountID, err := repo.AddWithdrawalAccount(ctx, childID, 404, "jazzcash", "0300•••567", "03001234567 | Premium")
+		if err != nil {
+			t.Fatal(err)
+		}
+		accounts, err := repo.ListWithdrawalAccounts(ctx, childID, 404)
+		if err != nil || len(accounts) != 1 || accounts[0].Details != "" || accounts[0].DisplayHint != "0300•••567" {
+			t.Fatalf("withdrawal accounts=%+v err=%v", accounts, err)
+		}
+		account, err := repo.WithdrawalAccount(ctx, childID, 404, accountID)
+		if err != nil || account.Details != "03001234567 | Premium" {
+			t.Fatalf("withdrawal account=%+v err=%v", account, err)
+		}
+		var rawAccount string
+		if err := pool.QueryRow(ctx, `SELECT details_config::text FROM withdrawal_accounts WHERE id=$1`, accountID).Scan(&rawAccount); err != nil || strings.Contains(rawAccount, "03001234567") {
+			t.Fatalf("account details were not encrypted raw=%q err=%v", rawAccount, err)
+		}
+		accountWithdrawalID, err := repo.CreateWithdrawalForAccount(ctx, childID, 404, accountID, 1, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var withdrawalHint, rawWithdrawal string
+		if err := pool.QueryRow(ctx, `SELECT details,details_config::text FROM withdrawals WHERE id=$1`, accountWithdrawalID).Scan(&withdrawalHint, &rawWithdrawal); err != nil || withdrawalHint != "0300•••567" || strings.Contains(rawWithdrawal, "03001234567") {
+			t.Fatalf("withdrawal details were not protected hint=%q raw=%q err=%v", withdrawalHint, rawWithdrawal, err)
+		}
+		loadedWithdrawal, err := repo.WithdrawalForInstance(ctx, childID, accountWithdrawalID)
+		if err != nil || loadedWithdrawal.Details != "03001234567 | Premium" {
+			t.Fatalf("loaded withdrawal=%+v err=%v", loadedWithdrawal, err)
+		}
+		if err := repo.ResolveWithdrawalForInstance(ctx, childID, accountWithdrawalID, 303, false); err != nil {
+			t.Fatal(err)
+		}
+		if err := repo.RemoveWithdrawalAccount(ctx, childID, 404, accountID); err != nil {
+			t.Fatal(err)
 		}
 		withdrawalID, err := repo.CreateWithdrawalForInstance(ctx, childID, 404, "PKR", 1, 0, "integration")
 		if err != nil {
@@ -241,7 +301,7 @@ func TestRewardConsumptionAndRecyclingScenario(t *testing.T) {
 	for i := range phones {
 		phones[i] = fmt.Sprintf("92300%07d", i)
 	}
-	if added, err := repo.AddNumbers(ctx, "WhatsApp", "Pakistan", "PK", 1, 0, 300, phones); err != nil || added != 300 {
+	if added, err := repo.AddNumbers(ctx, "WhatsApp", "Pakistan", "PK", 1, 0.01, 300, phones); err != nil || added != 300 {
 		t.Fatalf("AddNumbers added=%d err=%v", added, err)
 	}
 	assignment, err := repo.AssignNumbers(ctx, 101, "WhatsApp", "Pakistan", 300, 20*time.Minute)
@@ -264,12 +324,12 @@ func TestRewardConsumptionAndRecyclingScenario(t *testing.T) {
 			t.Fatalf("OTP %d was not counted", i)
 		}
 	}
-	pkr, _, total, err := repo.UserBalance(ctx, 101)
+	pkr, usd, total, err := repo.UserBalance(ctx, 101)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if total != 100 || pkr != 180 {
-		t.Fatalf("balance=%v total=%d, want 180/100", pkr, total)
+	if total != 100 || pkr != 180 || usd != 1 {
+		t.Fatalf("balances=%v PKR %.4f USD total=%d, want 180/1/100", pkr, usd, total)
 	}
 
 	duplicateMessage := "Your WhatsApp code is 100000"

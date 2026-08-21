@@ -45,6 +45,35 @@ func (s *Store) ListEnabledPanels(ctx context.Context) ([]domain.Panel, error) {
 	return panels, rows.Err()
 }
 
+func (s *Store) PanelForInstance(ctx context.Context, botInstanceID, panelID int64) (domain.Panel, error) {
+	var panel domain.Panel
+	var raw []byte
+	var seconds float64
+	err := s.pool.QueryRow(ctx, `SELECT id,bot_instance_id,name,kind,config,
+		extract(epoch from poll_interval),enabled,healthy,consecutive_failures,last_cursor
+		FROM panels WHERE bot_instance_id=$1 AND id=$2`, instanceID(botInstanceID), panelID).
+		Scan(&panel.ID, &panel.BotInstanceID, &panel.Name, &panel.Kind, &raw, &seconds, &panel.Enabled,
+			&panel.Healthy, &panel.ConsecutiveFailures, &panel.LastCursor)
+	if err != nil {
+		return panel, err
+	}
+	var envelope struct {
+		Encrypted string `json:"encrypted"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil || envelope.Encrypted == "" {
+		return panel, fmt.Errorf("panel %d has invalid encrypted config", panel.ID)
+	}
+	plaintext, err := s.cipher.Decrypt(envelope.Encrypted)
+	if err != nil {
+		return panel, fmt.Errorf("decrypt panel %d config: %w", panel.ID, err)
+	}
+	if err := json.Unmarshal(plaintext, &panel.Config); err != nil {
+		return panel, err
+	}
+	panel.PollInterval = time.Duration(seconds * float64(time.Second))
+	return panel, nil
+}
+
 func (s *Store) UpsertPanel(ctx context.Context, panel domain.Panel) (int64, error) {
 	return s.UpsertPanelForInstance(ctx, instanceID(panel.BotInstanceID), panel)
 }

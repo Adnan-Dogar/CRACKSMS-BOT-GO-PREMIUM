@@ -56,6 +56,20 @@ var appEmojiIDs = map[string]string{
 	"binance":   "5359437015752401733",
 }
 
+type AppDefinition struct {
+	Name          string
+	CustomEmojiID string
+}
+
+func DefaultApps() []AppDefinition {
+	names := []string{"WhatsApp", "Telegram", "Instagram", "Facebook", "Google", "Gmail", "Twitter / X", "TikTok", "Snapchat", "Binance"}
+	out := make([]AppDefinition, 0, len(names))
+	for _, name := range names {
+		out = append(out, AppDefinition{Name: name, CustomEmojiID: AppEmojiID(name)})
+	}
+	return out
+}
+
 func CountryEmojiID(code string) string {
 	if id := countryEmojiIDs[strings.ToUpper(strings.TrimSpace(code))]; id != "" {
 		return id
@@ -86,4 +100,11 @@ func CountryFlag(code, fallback string) string {
 
 func AppEmoji(service, fallback string) string {
 	return CustomEmoji(AppEmojiID(service), fallback)
+}
+
+func AppEmojiWithID(service, customEmojiID, fallback string) string {
+	if strings.TrimSpace(customEmojiID) == "" {
+		customEmojiID = AppEmojiID(service)
+	}
+	return CustomEmoji(customEmojiID, fallback)
 }

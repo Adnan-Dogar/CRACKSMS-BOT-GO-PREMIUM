@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -48,10 +49,16 @@ func (s *Store) AddNumbers(ctx context.Context, service, country, countryCode st
 }
 
 func (s *Store) Catalog(ctx context.Context) (map[string][]CatalogCountry, error) {
-	rows, err := s.pool.Query(ctx, `SELECT sc.service,sc.country,sc.country_code,sc.price_pkr,sc.numbers_per_cycle,count(n.id)
+	return s.CatalogForInstance(ctx, MainBotInstanceID)
+}
+
+func (s *Store) CatalogForInstance(ctx context.Context, botInstanceID int64) (map[string][]CatalogCountry, error) {
+	rows, err := s.pool.Query(ctx, `SELECT sc.service,sc.country,sc.country_code,sc.price_pkr,sc.numbers_per_cycle,
+		count(n.id),COALESCE(sp.custom_emoji_id,'')
 		FROM service_countries sc LEFT JOIN numbers n ON n.service=sc.service AND n.country=sc.country AND n.state='available'
-		WHERE sc.enabled GROUP BY sc.service,sc.country,sc.country_code,sc.price_pkr,sc.numbers_per_cycle
-		ORDER BY sc.service,sc.country`)
+		LEFT JOIN service_profiles sp ON sp.bot_instance_id=$1 AND sp.service_key=lower(sc.service)
+		WHERE sc.enabled GROUP BY sc.service,sc.country,sc.country_code,sc.price_pkr,sc.numbers_per_cycle,sp.custom_emoji_id
+		ORDER BY sc.service,sc.country`, instanceID(botInstanceID))
 	if err != nil {
 		return nil, err
 	}
@@ -60,7 +67,7 @@ func (s *Store) Catalog(ctx context.Context) (map[string][]CatalogCountry, error
 	for rows.Next() {
 		var service string
 		var item CatalogCountry
-		if err := rows.Scan(&service, &item.Country, &item.CountryCode, &item.PricePKR, &item.PerCycle, &item.Available); err != nil {
+		if err := rows.Scan(&service, &item.Country, &item.CountryCode, &item.PricePKR, &item.PerCycle, &item.Available, &item.CustomEmojiID); err != nil {
 			return nil, err
 		}
 		out[service] = append(out[service], item)
@@ -69,16 +76,18 @@ func (s *Store) Catalog(ctx context.Context) (map[string][]CatalogCountry, error
 }
 
 type CatalogCountry struct {
-	Country     string
-	CountryCode string
-	PricePKR    float64
-	PerCycle    int
-	Available   int
+	Country       string
+	CountryCode   string
+	PricePKR      float64
+	PerCycle      int
+	Available     int
+	CustomEmojiID string
 }
 
 type Withdrawal struct {
 	ID        int64
 	UserID    int64
+	AccountID int64
 	Method    string
 	AmountPKR float64
 	AmountUSD float64
@@ -90,7 +99,7 @@ func (s *Store) ListPendingWithdrawals(ctx context.Context, botInstanceID int64,
 	if limit <= 0 || limit > 100 {
 		limit = 25
 	}
-	rows, err := s.pool.Query(ctx, `SELECT w.id,w.user_id,w.method,w.amount_pkr,w.amount_usd,w.details,w.state
+	rows, err := s.pool.Query(ctx, `SELECT w.id,w.user_id,COALESCE(w.account_id,0),w.method,w.amount_pkr,w.amount_usd,w.details,w.details_config,w.state
 		FROM withdrawals w WHERE w.bot_instance_id=$1 AND w.state='pending' AND EXISTS(
 			SELECT 1 FROM bot_instance_users iu WHERE iu.bot_instance_id=w.bot_instance_id AND iu.user_id=w.user_id)
 		ORDER BY w.created_at,w.id LIMIT $2`, instanceID(botInstanceID), limit)
@@ -101,8 +110,15 @@ func (s *Store) ListPendingWithdrawals(ctx context.Context, botInstanceID int64,
 	var out []Withdrawal
 	for rows.Next() {
 		var item Withdrawal
-		if err := rows.Scan(&item.ID, &item.UserID, &item.Method, &item.AmountPKR, &item.AmountUSD, &item.Details, &item.State); err != nil {
+		var encryptedDetails []byte
+		if err := rows.Scan(&item.ID, &item.UserID, &item.AccountID, &item.Method, &item.AmountPKR, &item.AmountUSD, &item.Details, &encryptedDetails, &item.State); err != nil {
 			return nil, err
+		}
+		if len(encryptedDetails) > 0 {
+			item.Details, err = decryptEnvelope(encryptedDetails, s.cipher.Decrypt)
+			if err != nil {
+				return nil, err
+			}
 		}
 		out = append(out, item)
 	}
@@ -114,8 +130,28 @@ func (s *Store) CreateWithdrawal(ctx context.Context, userID int64, method strin
 }
 
 func (s *Store) CreateWithdrawalForInstance(ctx context.Context, botInstanceID, userID int64, method string, amountPKR, amountUSD float64, details string) (int64, error) {
+	return s.createWithdrawalForInstance(ctx, botInstanceID, userID, 0, method, amountPKR, amountUSD, maskStoredDetails(details), details)
+}
+
+func (s *Store) CreateWithdrawalForAccount(ctx context.Context, botInstanceID, userID, accountID int64, amountPKR, amountUSD float64) (int64, error) {
+	account, err := s.WithdrawalAccount(ctx, botInstanceID, userID, accountID)
+	if err != nil {
+		return 0, err
+	}
+	return s.createWithdrawalForInstance(ctx, botInstanceID, userID, account.ID, account.Method, amountPKR, amountUSD, account.DisplayHint, account.Details)
+}
+
+func (s *Store) createWithdrawalForInstance(ctx context.Context, botInstanceID, userID, accountID int64, method string, amountPKR, amountUSD float64, detailsHint, details string) (int64, error) {
 	if amountPKR <= 0 && amountUSD <= 0 {
 		return 0, errors.New("withdrawal amount must be positive")
+	}
+	encrypted, err := s.cipher.Encrypt([]byte(details))
+	if err != nil {
+		return 0, err
+	}
+	detailsConfig, err := json.Marshal(map[string]string{"encrypted": encrypted})
+	if err != nil {
+		return 0, err
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
@@ -130,8 +166,8 @@ func (s *Store) CreateWithdrawalForInstance(ctx context.Context, botInstanceID, 
 		return 0, errors.New("insufficient balance")
 	}
 	var id int64
-	if err := tx.QueryRow(ctx, `INSERT INTO withdrawals(bot_instance_id,user_id,method,amount_pkr,amount_usd,details)
-		VALUES($1,$2,$3,$4,$5,$6) RETURNING id`, instanceID(botInstanceID), userID, method, amountPKR, amountUSD, details).Scan(&id); err != nil {
+	if err := tx.QueryRow(ctx, `INSERT INTO withdrawals(bot_instance_id,user_id,account_id,method,amount_pkr,amount_usd,details,details_config)
+		VALUES($1,$2,NULLIF($3,0),$4,$5,$6,$7,$8) RETURNING id`, instanceID(botInstanceID), userID, accountID, method, amountPKR, amountUSD, detailsHint, detailsConfig).Scan(&id); err != nil {
 		return 0, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE users SET balance_pkr=balance_pkr-$2,balance_usd=balance_usd-$3 WHERE id=$1`, userID, amountPKR, amountUSD); err != nil {
@@ -150,6 +186,26 @@ func (s *Store) CreateWithdrawalForInstance(ctx context.Context, botInstanceID, 
 		}
 	}
 	return id, tx.Commit(ctx)
+}
+
+func (s *Store) WithdrawalForInstance(ctx context.Context, botInstanceID, id int64) (Withdrawal, error) {
+	var item Withdrawal
+	var encryptedDetails []byte
+	err := s.pool.QueryRow(ctx, `SELECT id,user_id,COALESCE(account_id,0),method,amount_pkr,amount_usd,details,details_config,state
+		FROM withdrawals WHERE bot_instance_id=$1 AND id=$2`, instanceID(botInstanceID), id).
+		Scan(&item.ID, &item.UserID, &item.AccountID, &item.Method, &item.AmountPKR, &item.AmountUSD, &item.Details, &encryptedDetails, &item.State)
+	if err == nil && len(encryptedDetails) > 0 {
+		item.Details, err = decryptEnvelope(encryptedDetails, s.cipher.Decrypt)
+	}
+	return item, err
+}
+
+func maskStoredDetails(value string) string {
+	runes := []rune(strings.TrimSpace(value))
+	if len(runes) <= 6 {
+		return strings.Repeat("•", len(runes))
+	}
+	return string(runes[:3]) + "•••" + string(runes[len(runes)-3:])
 }
 
 func (s *Store) ResolveWithdrawal(ctx context.Context, id, adminID int64, approve bool) error {

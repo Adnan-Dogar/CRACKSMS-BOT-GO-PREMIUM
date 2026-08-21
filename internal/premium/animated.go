@@ -15,47 +15,38 @@ type animatedGlyph struct {
 // text nodes only: it never rewrites HTML tags, existing tg-emoji fallbacks,
 // or literal code/pre blocks.
 var animatedGlyphs = []animatedGlyph{
-	{"🔥", "5773906538459573336"},
-	{"⚡", "5461151367559362727"},
-	{"👑", "5392399685018067802"},
-	{"💎", "5471952986970267163"},
-	{"⭐", "5368324170671202286"},
-	{"🔑", "5472211234521076011"},
-	{"🔒", "5472308992514464048"},
-	{"🤖", "5361215897565626609"},
-	{"🛡️", "5359311622483678195"},
-	{"🛡", "5359311622483678195"},
-	{"🚀", "5395303611011550609"},
-	{"⚙️", "5359831736784843489"},
-	{"⚙", "5359831736784843489"},
-	{"📊", "5359735404426468588"},
-	{"🔔", "5359766118363525030"},
-	{"💀", "5350934059607329445"},
-	{"✅", "5368324170671202286"},
-	{"🌍", "5368324170671202286"},
-	{"📱", "5359831736784843489"},
-	{"💬", "5359735404426468588"},
-	{"🗣️", "5359766118363525030"},
-	{"🗣", "5359766118363525030"},
-	{"📞", "5359311622483678195"},
-	{"📡", "5359831736784843489"},
-	{"🕐", "5368324170671202286"},
-	{"📍", "5359831736784843489"},
-	{"❄️", "5359831736784843489"},
-	{"❄", "5359831736784843489"},
-	{"🧊", "5359831736784843489"},
-	{"📢", "5359735404426468588"},
-	{"📄", "5359735404426468588"},
-	{"📝", "5359735404426468588"},
-	{"✂️", "5359831736784843489"},
-	{"✂", "5359831736784843489"},
-	{"💻", "5359831736784843489"},
-	{"👥", "5359735404426468588"},
-	{"🌐", "5359831736784843489"},
-	{"🔬", "5359831736784843489"},
-	{"📋", "5359735404426468588"},
-	{"📩", "5359735404426468588"},
-	{"🎲", "5359831736784843489"},
+	{"🛡️", ID("shield")}, {"⚙️", ID("settings")}, {"🗣️", ID("message")},
+	{"❄️", ID("snow")}, {"✂️", ID("scissors")}, {"⚠️", ID("warning")},
+	{"ℹ️", ID("info")}, {"▶️", ID("play")}, {"⏹️", ID("stop")},
+	{"⬇️", ID("download")}, {"☄️", ID("fire")},
+	{"🔥", ID("fire")}, {"⚡", ID("bolt")}, {"👑", ID("crown")},
+	{"💎", ID("diamond")}, {"⭐", ID("deluxe_star")}, {"🌟", ID("deluxe_star")},
+	{"🔑", ID("key")}, {"🔒", ID("lock")}, {"🔐", ID("lock")},
+	{"🤖", ID("bot")}, {"🛡", ID("shield")}, {"🚀", ID("rocket")},
+	{"⚙", ID("settings")}, {"📊", ID("chart")}, {"🔔", ID("bell")},
+	{"💀", ID("skull")}, {"✅", ID("check")}, {"❌", ID("cancel")},
+	{"🚫", ID("cancel")}, {"🌍", ID("earth")}, {"🌐", ID("globe")},
+	{"📱", ID("phone")}, {"💬", ID("chat")}, {"🗣", ID("message")},
+	{"📞", ID("receiver")}, {"☎️", ID("telephone")}, {"☎", ID("telephone")},
+	{"📡", ID("satellite")}, {"🕐", ID("clock")}, {"⏰", ID("alarm")},
+	{"🕓", ID("timezone")}, {"📍", ID("pushpin")}, {"❄", ID("snow")},
+	{"🧊", ID("ice")}, {"📢", ID("megaphone")}, {"📣", ID("megaphone")},
+	{"📄", ID("document")}, {"📝", ID("notepad")}, {"✂", ID("scissors")},
+	{"💻", ID("laptop")}, {"🧑‍💻", ID("developer")}, {"👥", ID("people")},
+	{"👋", ID("people")}, {"👤", ID("user")}, {"👮", ID("police")},
+	{"🔬", ID("microscope")}, {"🧪", ID("laboratory")}, {"📋", ID("copy")},
+	{"📩", ID("inbox")}, {"📨", ID("inbox")}, {"📭", ID("empty_inbox")},
+	{"🎲", ID("dice")}, {"🎯", ID("focus")}, {"🎁", ID("gift")},
+	{"📖", ID("book")}, {"📚", ID("books")}, {"🔗", ID("link")},
+	{"🔙", ID("back")}, {"🗑", ID("trash")}, {"❓", ID("help")},
+	{"🟢", ID("online")}, {"🔴", ID("offline")}, {"🔄", ID("refresh")},
+	{"⌛", ID("hourglass")}, {"💰", ID("money")}, {"💵", ID("withdraw")},
+	{"💸", ID("withdraw")}, {"💲", ID("dollar")}, {"💳", ID("card")},
+	{"📂", ID("folder")}, {"📤", ID("upload")}, {"✏️", ID("edit")},
+	{"✏", ID("edit")}, {"✨", ID("sparkles")}, {"🔌", ID("plug")},
+	{"💼", ID("briefcase")}, {"🤝", ID("handshake")}, {"🏆", ID("trophy")},
+	{"🎨", ID("palette")}, {"🧩", ID("puzzle")}, {"🏠", ID("home")},
+	{"➕", ID("add")}, {"📅", ID("calendar")},
 }
 
 func init() {
@@ -104,6 +95,19 @@ func AnimateHTML(input string) string {
 			if matched {
 				continue
 			}
+			r, size := utf8.DecodeRuneInString(input[index:])
+			if isEmojiRune(r) {
+				end := index + size
+				if end < len(input) {
+					next, nextSize := utf8.DecodeRuneInString(input[end:])
+					if next == '\ufe0f' {
+						end += nextSize
+					}
+				}
+				out.WriteString(CustomEmoji(ID("unmapped_emoji"), input[index:end]))
+				index = end
+				continue
+			}
 		}
 		_, size := utf8.DecodeRuneInString(input[index:])
 		if size == 0 {
@@ -113,6 +117,12 @@ func AnimateHTML(input string) string {
 		index += size
 	}
 	return out.String()
+}
+
+func isEmojiRune(r rune) bool {
+	return (r >= 0x1F000 && r <= 0x1FAFF) ||
+		(r >= 0x2600 && r <= 0x27BF) ||
+		(r >= 0x1F1E6 && r <= 0x1F1FF)
 }
 
 func htmlTag(tag string) (name string, closing, selfClosing bool) {

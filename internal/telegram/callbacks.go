@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/adnan-dogar/cracksms-vnext/internal/domain"
+	"github.com/adnan-dogar/cracksms-vnext/internal/premium"
 	"github.com/adnan-dogar/cracksms-vnext/internal/store"
 	"github.com/adnan-dogar/cracksms-vnext/internal/themes"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -32,10 +33,18 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 		a.handleReferral(ctx, chatID, userID)
 		return true
 	case "menu:withdraw":
-		a.sendHTML(chatID, "💸 <b>Request a withdrawal</b>\n\nSend <code>/withdraw amount|payment details</code>. The amount is held immediately and refunded automatically if an admin rejects the request.", commandTemplateMenu("Copy withdrawal template", "/withdraw 100|JazzCash 03001234567", "menu:profile"))
+		a.sendWithdrawalMenu(ctx, chatID, userID)
 		return true
 	case "menu:mybots":
 		a.handleMyBots(ctx, chatID, userID)
+		return true
+	}
+	if a.handleWithdrawalCallback(ctx, callback) {
+		return true
+	}
+	if data == "flow:cancel" {
+		_ = a.store.ClearTelegramFlow(ctx, a.botInstanceID, userID)
+		a.sendHTML(chatID, "❌ Interactive action cancelled.", compactMenu(admin, a.isMain))
 		return true
 	}
 
@@ -56,6 +65,9 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 		a.sendHTML(chatID, "🚫 You do not have permission for this admin action.", userBackMenu())
 		return true
 	}
+	if a.handleAdminInteractiveCallback(ctx, callback) {
+		return true
+	}
 
 	parts := strings.Split(data, ":")
 	switch {
@@ -64,7 +76,7 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 	case data == "admin:inventory":
 		a.sendAdminInventory(ctx, chatID)
 	case data == "admin:numbers:upload":
-		a.sendHTML(chatID, "📤 <b>Upload Numbers</b>\n\nAttach a UTF-8 text file and use this command as its caption. Each line or whitespace-separated value is treated as one number.", commandTemplateMenu("Copy upload caption", "/addnumbers WhatsApp|Pakistan|PK|1.00|0|3", "admin:numbers"))
+		a.startNumberImport(ctx, chatID, userID)
 	case data == "admin:broadcast":
 		a.sendHTML(chatID, "📢 <b>Broadcast</b>\n\nCopy the template, replace the text, and send it. Delivery is rate-limited and reports sent/failed totals.", commandTemplateMenu("Copy broadcast command", "/broadcast Your announcement", "menu:admin"))
 	case data == "admin:users":
@@ -102,10 +114,21 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 			a.sendHTML(chatID, "Invalid withdrawal ID.", adminWithdrawalsMenu(nil))
 			break
 		}
-		err := a.store.ResolveWithdrawalForInstance(ctx, a.botInstanceID, id, userID, parts[4] == "approve")
+		withdrawal, lookupErr := a.store.WithdrawalForInstance(ctx, a.botInstanceID, id)
+		if lookupErr != nil {
+			a.sendError(chatID, lookupErr)
+			break
+		}
+		approved := parts[4] == "approve"
+		err := a.store.ResolveWithdrawalForInstance(ctx, a.botInstanceID, id, userID, approved)
 		if err != nil {
 			a.sendError(chatID, err)
 		} else {
+			state, note := "approved", "The owner approved your payout request."
+			if !approved {
+				state, note = "rejected", "The held amount has been returned to your balance."
+			}
+			a.sendHTML(withdrawal.UserID, fmt.Sprintf("💸 <b>Withdrawal #%d %s</b>\n\n%s", id, state, note), profileMenu())
 			a.sendAdminWithdrawals(ctx, chatID)
 		}
 	case data == "admin:admins":
@@ -192,7 +215,7 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 	case data == "admin:panels":
 		a.listPanels(ctx, chatID)
 	case data == "admin:panel:add":
-		a.sendHTML(chatID, "➕ <b>Add an encrypted panel</b>\n\nThe command containing credentials is deleted immediately after processing. The adapter is tested before it is saved.", commandTemplateMenu("Copy panel command", `/addpanel token_api|Provider|2s|{"url":"https://provider/api","token":"replace-me"}`, "admin:panels"))
+		a.startPanelWizard(ctx, chatID, userID)
 	case len(parts) == 4 && parts[1] == "panel" && parts[2] == "view":
 		a.sendAdminPanel(ctx, chatID, parts[3])
 	case len(parts) == 5 && parts[1] == "panel" && parts[2] == "set":
@@ -363,7 +386,7 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 }
 
 func (a *App) handleBuyCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
-	catalog, err := a.store.Catalog(ctx)
+	catalog, err := a.store.CatalogForInstance(ctx, a.botInstanceID)
 	if err != nil {
 		a.sendError(callback.Message.Chat.ID, err)
 		return
@@ -377,7 +400,8 @@ func (a *App) handleBuyCallback(ctx context.Context, callback *tgbotapi.Callback
 			return
 		}
 		service := services[index]
-		a.sendHTML(callback.Message.Chat.ID, fmt.Sprintf("🌍 <b>%s countries</b>\n\nAvailability is shown on each button.", html.EscapeString(service)), countriesMenu(index, catalog[service]))
+		a.sendHTML(callback.Message.Chat.ID, fmt.Sprintf("%s <b>%s countries</b>\n\nAvailability is shown on each button.",
+			premium.CustomEmoji(catalogServiceEmojiID(service, catalog[service]), "📱"), html.EscapeString(service)), countriesMenu(index, catalog[service]))
 		return
 	}
 	if len(parts) == 4 && parts[1] == "c" {
@@ -422,7 +446,7 @@ func adminCallbackPermission(data string) string {
 		return "broadcast"
 	case data == "admin:analytics":
 		return "view_analytics"
-	case strings.HasPrefix(data, "admin:numbers"), data == "admin:inventory", strings.HasPrefix(data, "admin:required"), strings.HasPrefix(data, "admin:setting"), strings.HasPrefix(data, "admin:theme"):
+	case strings.HasPrefix(data, "admin:numbers"), strings.HasPrefix(data, "admin:upload"), data == "admin:inventory", strings.HasPrefix(data, "admin:required"), strings.HasPrefix(data, "admin:setting"), strings.HasPrefix(data, "admin:theme"):
 		return "manage_settings"
 	default:
 		return ""
@@ -439,7 +463,7 @@ func (a *App) sendAdminUsers(ctx context.Context, chatID int64) {
 }
 
 func (a *App) sendAdminInventory(ctx context.Context, chatID int64) {
-	catalog, err := a.store.Catalog(ctx)
+	catalog, err := a.store.CatalogForInstance(ctx, a.botInstanceID)
 	if err != nil {
 		a.sendError(chatID, err)
 		return

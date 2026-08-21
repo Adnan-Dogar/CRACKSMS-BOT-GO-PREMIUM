@@ -3,19 +3,20 @@ package domain
 import "time"
 
 type OTPEvent struct {
-	ID                string
-	DedupKey          string
-	BotInstanceID     int64
-	PanelID           int64
-	PanelName         string
-	Phone             string
-	NormalizedPhone   string
-	Service           string
-	Country           string
-	Message           string
-	Code              string
-	ProviderTimestamp *time.Time
-	ReceivedAt        time.Time
+	ID                   string
+	DedupKey             string
+	BotInstanceID        int64
+	PanelID              int64
+	PanelName            string
+	Phone                string
+	NormalizedPhone      string
+	Service              string
+	ServiceCustomEmojiID string
+	Country              string
+	Message              string
+	Code                 string
+	ProviderTimestamp    *time.Time
+	ReceivedAt           time.Time
 }
 
 type AcceptedOTP struct {
@@ -25,8 +26,10 @@ type AcceptedOTP struct {
 	Counted          bool
 	DailyCount       int
 	BaseCreditPKR    float64
+	BaseCreditUSD    float64
 	RewardCreditPKR  float64
 	NewBalancePKR    float64
+	NewBalanceUSD    float64
 	TriggeredRewards []RewardAward
 }
 

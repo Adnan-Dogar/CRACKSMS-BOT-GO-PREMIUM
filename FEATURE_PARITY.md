@@ -8,18 +8,18 @@ This matrix compares the three supplied legacy repositories and the v20/v21 inve
 | Buttons optional per group | `buttons_enabled`, `/groupbuttons` |
 | Public OTP privacy | Per-group `visible`, `masked`, or `hidden`; message and copy controls are redacted together |
 | Ten OTP themes | T0–T9 renderers and `/otpguipreview`; global, group, and user selection |
-| Premium emojis/button colors | Legacy country/app/UI custom-emoji ID catalogs; HTML-safe `<tg-emoji>` rendering; raw Bot API `icon_custom_emoji_id`, `style`, and `copy_text`; Unicode fallback for older clients |
+| Premium emojis/button colors | Centralized legacy country/app/UI custom-emoji ID catalogs; all bot-facing icons pass through HTML-safe `<tg-emoji>` rendering; unknown/missing icons use a named custom-ID placeholder; raw Bot API `icon_custom_emoji_id`, `style`, and `copy_text` |
 | OTP extraction | Multilingual and formatted-code rules, plus tenant custom RE2 capture patterns |
 | Deduplication | Provider-record-aware keys and PostgreSQL uniqueness |
-| Multi-panel support | Token, legacy URL, login/cookie, and WebSocket adapters; encrypted config and supervised workers |
+| Multi-panel support | Styled wizard for Login, CR API, reseller/legacy API, and IVAS WebSocket; connection test before save, encrypted config, test-now controls, and supervised workers |
 | Speed/reliability | Concurrent panel workers, durable ingest queue, atomic cursor advance, SKIP LOCKED delivery workers, retry/backoff |
 | First OTP consumes number | Transactional assignment consumption; later events cannot credit the number again |
 | 20-minute re-add | Expiry scheduler returns no-OTP numbers and excludes the previous user for 24 hours |
 | Daily rewards | Global and per-user replacement schedules; cumulative milestones and Asia/Karachi logical day reset |
-| Earnings/referrals/withdrawals | Immutable ledger, balances, qualification, holds/refunds, admin approval |
+| Earnings/referrals/withdrawals | PKR/USDT earnings and immutable ledger; encrypted JazzCash/Easypaisa/Binance/BEP20 accounts; balance-aware request wizard, owner notification, holds/refunds, and admin approval |
 | User experience | Styled compact/full dashboards, dynamic inline service/country picker, stats, history pagination, profile, leaderboard, settings, help, FAQ-style guide |
 | Force join | Tenant-scoped required chats and styled verification controls |
-| Admin dashboard | Full styled inline navigation and guarded actions for inventory, panels, groups, rewards, users/tiers, bots, tutorials, withdrawals, admins, required chats, patterns, broadcasts, settings, and analytics |
+| Admin dashboard | Full styled inline navigation and guarded actions for service-first auto-country inventory upload, panels, groups, rewards, users/tiers, bots, tutorials, withdrawals, admins, required chats, patterns, broadcasts, settings, and analytics |
 | Analytics | Telegram dashboard, health/Prometheus metrics, and Enterprise JSON API |
 | Free/Pro/Enterprise | Persistent subscriptions and 2/10/50 panel limits; feature gates |
 | Child bots | Encrypted requests, approval/rejection, tier selection, tenant admins/groups/panels/settings, supervised clients and routed deliveries |

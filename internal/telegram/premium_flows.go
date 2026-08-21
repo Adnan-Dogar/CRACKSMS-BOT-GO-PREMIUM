@@ -671,7 +671,7 @@ func (a *App) adminListPatterns(ctx context.Context, chatID int64) {
 
 func activeMark(active bool) string {
 	if active {
-		return "✅"
+		return "ACTIVE"
 	}
 	return ""
 }

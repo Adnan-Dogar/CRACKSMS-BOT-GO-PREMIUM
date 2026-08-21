@@ -64,7 +64,7 @@ func Format(event domain.OTPEvent, themeID int, forUser bool, visibility string)
 	code, message := privacyText(event.Code, event.Message, visibility)
 	panel := defaultText(event.PanelName, "Unknown")
 	serviceName := defaultText(event.Service, "Unknown")
-	service := premium.AppEmoji(event.Service, country.ServiceEmoji(event.Service)) + " " + html.EscapeString(serviceName)
+	service := premium.AppEmojiWithID(event.Service, event.ServiceCustomEmojiID, country.ServiceEmoji(event.Service)) + " " + html.EscapeString(serviceName)
 	location := country.Detect(event.NormalizedPhone)
 	if event.Country != "" {
 		location.Name = event.Country

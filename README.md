@@ -9,8 +9,8 @@ The behavioral baselines are [CRACKSMSBOTV2](https://github.com/Adnan-Dogar/CRAC
 - Dynamic OTP destination groups with independently configurable buttons.
 - Per-group OTP privacy (`visible`, `masked`, or `hidden`), button mode, and theme override. Visible mode keeps the earlier full-code behavior; hidden mode redacts the code from both the body and buttons.
 - Ten complete OTP themes (Classic, Minimal, Developer, Electric, Tech, Premium, UltraMinimal, Business, Social, and Deluxe) with animated country/service detection.
-- The original CrackSMS animated country-flag, service/app, and UI custom-emoji ID catalogs are ported with Unicode fallbacks.
-- An HTML-safe renderer emits `<tg-emoji emoji-id="…">fallback</tg-emoji>` in bot UI, OTP, broadcast, daily-summary, tutorial, and scheduled HTML messages without nesting existing custom emoji or modifying code blocks.
+- The original CrackSMS animated country-flag, service/app, and UI custom-emoji ID catalogs are ported. Bot-facing emoji are never emitted as plain UI icons: the HTML-safe renderer emits `<tg-emoji emoji-id="…">fallback</tg-emoji>` in bot UI, OTP, broadcast, daily-summary, tutorial, and scheduled HTML messages without nesting existing custom emoji or modifying code blocks.
+- Verified UI IDs and clearly marked replacement keys are centralized in `internal/premium/custom_emoji_ids.go`; country/app catalogs remain in `internal/premium/catalog.go`. Unknown emoji also use a valid custom-emoji placeholder rather than remaining plain Unicode.
 - Shared premium button builders carry Telegram `primary`, `success`, `danger`, `copy_text`, and `icon_custom_emoji_id` fields across user/admin/theme interfaces.
 - Styled compact/full menus, dynamic service/country selection, and permission-gated admin submenus cover panels, groups, inventory, rewards, users/tiers, withdrawals, admins, required chats, patterns, child bots, tutorials, settings, analytics, and broadcasts.
 - The first deduplicated OTP for an assigned number consumes that number and counts once for earnings/rewards.
@@ -18,10 +18,11 @@ The behavioral baselines are [CRACKSMSBOTV2](https://github.com/Adnan-Dogar/CRAC
 - A returned number is immediately available to other users but excluded from its previous user for 24 hours.
 - Global cumulative daily reward milestones with per-user replacement schedules.
 - Normal service/country PKR earnings plus milestone bonuses and an immutable balance ledger.
-- Token API, legacy API, login/cookie, and WebSocket panel adapters with supervised workers.
+- Token API, legacy/reseller API, login/cookie, and IVAS WebSocket panel adapters with supervised workers. The styled Add Panel wizard collects each connection field, deletes secret-bearing messages, tests the adapter, encrypts the configuration, and only then saves it.
 - Persistent Telegram delivery jobs, retry/backoff, rate limiting, and destination health.
 - Durable panel-ingest jobs: a successful panel cursor is committed atomically with its events, so restarts cannot lose the gap between polling and OTP processing.
-- User accounts, balances, referrals, withdrawals, leaderboard, force-join chats, broadcasts, admins, inventory imports, panel health, and daily summaries.
+- User accounts, balances, referrals, withdrawals, leaderboard, force-join chats, broadcasts, admins, inventory imports, panel health, and daily summaries. Withdrawals support encrypted saved JazzCash, Easypaisa, Binance, and USDT BEP20 accounts, available-balance checks, confirmation, immediate owner/admin notification, approval, rejection, and atomic refund.
+- Number upload is an interactive service-first flow: upload `.txt`/`.csv`, choose a built-in premium app icon or enter an Other App name/custom emoji ID, configure PKR/USDT earnings, confirm, and auto-detect each number's country and premium flag.
 - User statistics/history, compact and full dashboards, settings, tutorials/media, scoped admin permissions, and request throttling.
 - Free/Pro/Enterprise subscriptions, panel limits (2/10/50), persistent signed webhooks, message scheduling, and rate-limited Enterprise API access.
 - Encrypted child-bot requests, admin approval/tier selection, isolated bot/group/panel/admin configuration, runtime supervision, and automatic restart reconciliation.
@@ -118,13 +119,28 @@ Panel configuration messages are deleted after processing and their JSON is encr
 /addpanel websocket|IVAS|1s|{"url":"wss://provider/socket","token":"..."}
 ```
 
-To import numbers, upload a plain `.txt` document with this caption:
+For the recommended import flow, open **Admin → Numbers → Upload Numbers**, upload a plain `.txt` or `.csv`, and choose the service from the premium-icon picker. The bot auto-detects country per number. **Other App** asks for the app name and numeric Telegram custom emoji ID.
+
+The legacy caption remains supported:
 
 ```text
 /addnumbers WhatsApp|Pakistan|PK|1.00|0|3
 ```
 
 Each line or whitespace-separated item in the file is treated as one phone number. Duplicates and invalid values are skipped.
+
+## Custom emoji IDs to replace
+
+Edit `internal/premium/custom_emoji_ids.go`. Replace only the `PUT_REAL_CUSTOM_EMOJI_ID_HERE` values in `replaceCustomEmojiIDs`; handlers and menus do not need editing. The pending keys are:
+
+```text
+alarm, books, briefcase, calendar, card, deluxe_star, dollar, edit,
+empty_inbox, folder, handshake, home, inbox, laboratory, palette,
+paint, police, plug, puzzle, sparkles, target, telephone, timezone,
+trophy, unmapped_emoji, upload, warning
+```
+
+Until a real ID is entered, the bot uses one verified numeric placeholder custom-emoji ID, so Telegram still receives a custom entity. Built-in country and service IDs are already populated. A custom service created through **Other App** stores the ID entered by the admin and uses it in Get Number buttons and OTP messages.
 
 ## Graceful legacy migration
 

@@ -112,7 +112,13 @@ func (a *App) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 		}
 	}
 	if message.Document != nil {
+		if a.handleInteractiveDocument(ctx, message, admin) {
+			return
+		}
 		a.handleDocument(ctx, message, admin)
+		return
+	}
+	if a.handleFlowText(ctx, message, admin) {
 		return
 	}
 	if !message.IsCommand() {
@@ -202,7 +208,7 @@ func (a *App) handleHelp(chatID int64, admin bool) {
 }
 
 func (a *App) handleServices(ctx context.Context, chatID int64) {
-	catalog, err := a.store.Catalog(ctx)
+	catalog, err := a.store.CatalogForInstance(ctx, a.botInstanceID)
 	if err != nil {
 		a.sendError(chatID, err)
 		return
@@ -214,7 +220,7 @@ func (a *App) handleServices(ctx context.Context, chatID int64) {
 	var text strings.Builder
 	text.WriteString("📱 <b>Available services</b>\n")
 	for _, service := range store.SortedServices(catalog) {
-		text.WriteString("\n<b>" + html.EscapeString(service) + "</b>\n")
+		text.WriteString("\n" + premium.CustomEmoji(catalogServiceEmojiID(service, catalog[service]), "📱") + " <b>" + html.EscapeString(service) + "</b>\n")
 		for _, country := range catalog[service] {
 			fmt.Fprintf(&text, "• %s — %d available — %.2f PKR\n", html.EscapeString(country.Country), country.Available, country.PricePKR)
 		}
@@ -229,7 +235,7 @@ func (a *App) handleGetNumber(ctx context.Context, message *tgbotapi.Message, ar
 		a.sendHTML(message.Chat.ID, "Usage: <code>/getnumber Service|Country</code>", nil)
 		return
 	}
-	catalog, err := a.store.Catalog(ctx)
+	catalog, err := a.store.CatalogForInstance(ctx, a.botInstanceID)
 	if err != nil {
 		a.sendError(message.Chat.ID, err)
 		return
@@ -253,7 +259,8 @@ func (a *App) handleGetNumber(ctx context.Context, message *tgbotapi.Message, ar
 		return
 	}
 	var text strings.Builder
-	fmt.Fprintf(&text, "✅ <b>%d number(s) assigned</b>\n\n", len(assignment.Numbers))
+	fmt.Fprintf(&text, "%s ✅ <b>%d %s number(s) assigned</b>\n\n",
+		premium.CustomEmoji(catalogServiceEmojiID(parts[0], catalog[parts[0]]), "📱"), len(assignment.Numbers), html.EscapeString(parts[0]))
 	for i, number := range assignment.Numbers {
 		fmt.Fprintf(&text, "%d. <code>+%s</code>\n", i+1, number.NormalizedPhone)
 	}
@@ -319,6 +326,10 @@ func (a *App) handleReferral(ctx context.Context, chatID, userID int64) {
 }
 
 func (a *App) handleWithdraw(ctx context.Context, message *tgbotapi.Message, args string) {
+	if strings.TrimSpace(args) == "" {
+		a.sendWithdrawalMenu(ctx, message.Chat.ID, message.From.ID)
+		return
+	}
 	parts := splitExact(args, "|", 2)
 	if len(parts) != 2 {
 		a.sendHTML(message.Chat.ID, "Usage: <code>/withdraw amount|payment details</code>", nil)
@@ -335,6 +346,7 @@ func (a *App) handleWithdraw(ctx context.Context, message *tgbotapi.Message, arg
 		return
 	}
 	a.sendHTML(message.Chat.ID, fmt.Sprintf("✅ Withdrawal request <b>#%d</b> submitted.", id), nil)
+	a.notifyWithdrawalReviewers(ctx, message.From, id, store.WithdrawalAccount{Method: "PKR", DisplayHint: maskValue(parts[1], 3, 3), Details: parts[1]}, amount, 0)
 }
 
 func (a *App) handleAdminCommand(ctx context.Context, message *tgbotapi.Message, command, args string) bool {
@@ -370,7 +382,8 @@ func (a *App) handleAdminCommand(ctx context.Context, message *tgbotapi.Message,
 		if chat.Title != "" {
 			title = chat.Title
 		}
-		test := tgbotapi.NewMessage(chatID, "✅ CrackSMS vNext OTP delivery test successful.")
+		test := tgbotapi.NewMessage(chatID, premium.AnimateHTML("✅ CrackSMS vNext OTP delivery test successful."))
+		test.ParseMode = tgbotapi.ModeHTML
 		if _, err := a.bot.Send(test); err != nil {
 			a.sendHTML(message.Chat.ID, "Bot cannot post to that chat: "+html.EscapeString(err.Error()), nil)
 			return true
@@ -625,6 +638,16 @@ func (a *App) handleDocument(ctx context.Context, message *tgbotapi.Message, adm
 		return
 	}
 	args := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(message.Caption), "/addnumbers"))
+	if args == "" {
+		if err := a.store.SetTelegramFlow(ctx, a.botInstanceID, message.From.ID, store.TelegramFlow{
+			Kind: "number_import", Step: "file", Data: map[string]string{}, ExpiresAt: time.Now().Add(interactiveFlowLifetime),
+		}); err != nil {
+			a.sendError(message.Chat.ID, err)
+			return
+		}
+		a.handleInteractiveDocument(ctx, message, admin)
+		return
+	}
 	parts := splitExact(args, "|", 6)
 	if len(parts) != 6 {
 		a.sendHTML(message.Chat.ID, "Caption format: <code>/addnumbers Service|Country|CC|PricePKR|PriceUSD|PerCycle</code>", nil)

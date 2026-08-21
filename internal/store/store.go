@@ -166,10 +166,10 @@ func (s *Store) AcceptOTP(ctx context.Context, event domain.OTPEvent) (domain.Ac
 	result := domain.AcceptedOTP{EventID: event.ID}
 	var assignmentID string
 	var numberID, userID int64
-	var basePrice float64
+	var basePrice, basePriceUSD float64
 	var assignedService, assignedCountry string
 	err = tx.QueryRow(ctx, `
-		SELECT a.id,n.id,a.user_id,sc.price_pkr,n.service,n.country
+		SELECT a.id,n.id,a.user_id,sc.price_pkr,sc.price_usd,n.service,n.country
 		FROM numbers n
 		JOIN assignment_numbers an ON an.number_id=n.id
 		JOIN assignments a ON a.id=an.assignment_id
@@ -178,7 +178,7 @@ func (s *Store) AcceptOTP(ctx context.Context, event domain.OTPEvent) (domain.Ac
 		  AND a.state='active' AND a.expires_at>now()
 		  AND an.consumed_at IS NULL AND an.released_at IS NULL
 		ORDER BY a.assigned_at DESC LIMIT 1
-		FOR UPDATE OF n,an,a`, event.NormalizedPhone, event.BotInstanceID).Scan(&assignmentID, &numberID, &userID, &basePrice, &assignedService, &assignedCountry)
+		FOR UPDATE OF n,an,a`, event.NormalizedPhone, event.BotInstanceID).Scan(&assignmentID, &numberID, &userID, &basePrice, &basePriceUSD, &assignedService, &assignedCountry)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return domain.AcceptedOTP{}, err
 	}
@@ -186,6 +186,7 @@ func (s *Store) AcceptOTP(ctx context.Context, event domain.OTPEvent) (domain.Ac
 		result.AssignedUserID = userID
 		result.Counted = true
 		result.BaseCreditPKR = basePrice
+		result.BaseCreditUSD = basePriceUSD
 		event.Service, event.Country = assignedService, assignedCountry
 		if _, err = tx.Exec(ctx, `UPDATE assignment_numbers SET consumed_at=now(),otp_event_id=$1
 			WHERE assignment_id=$2 AND number_id=$3 AND consumed_at IS NULL`, event.ID, assignmentID, numberID); err != nil {
@@ -213,7 +214,13 @@ func (s *Store) AcceptOTP(ctx context.Context, event domain.OTPEvent) (domain.Ac
 			VALUES($1,'PKR',$2,'otp_earning','otp_event',$3)`, userID, basePrice, event.ID); err != nil {
 			return domain.AcceptedOTP{}, err
 		}
-		if _, err = tx.Exec(ctx, `UPDATE users SET balance_pkr=balance_pkr+$2,total_otps=total_otps+1 WHERE id=$1`, userID, basePrice); err != nil {
+		if basePriceUSD > 0 {
+			if _, err = tx.Exec(ctx, `INSERT INTO balance_ledger(user_id,currency,amount,entry_type,reference_type,reference_id)
+				VALUES($1,'USD',$2,'otp_earning','otp_event',$3)`, userID, basePriceUSD, event.ID); err != nil {
+				return domain.AcceptedOTP{}, err
+			}
+		}
+		if _, err = tx.Exec(ctx, `UPDATE users SET balance_pkr=balance_pkr+$2,balance_usd=balance_usd+$3,total_otps=total_otps+1 WHERE id=$1`, userID, basePrice, basePriceUSD); err != nil {
 			return domain.AcceptedOTP{}, err
 		}
 		if err = s.awardReferralIfQualified(ctx, tx, userID); err != nil {
@@ -255,7 +262,7 @@ func (s *Store) AcceptOTP(ctx context.Context, event domain.OTPEvent) (domain.Ac
 		_, _ = tx.Exec(ctx, `UPDATE panels SET otp_count=otp_count+1 WHERE id=$1`, event.PanelID)
 	}
 	if userID != 0 {
-		if err = tx.QueryRow(ctx, `SELECT balance_pkr FROM users WHERE id=$1`, userID).Scan(&result.NewBalancePKR); err != nil {
+		if err = tx.QueryRow(ctx, `SELECT balance_pkr,balance_usd FROM users WHERE id=$1`, userID).Scan(&result.NewBalancePKR, &result.NewBalanceUSD); err != nil {
 			return domain.AcceptedOTP{}, err
 		}
 	}

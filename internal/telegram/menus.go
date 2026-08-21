@@ -37,14 +37,118 @@ func servicesMenu(catalog map[string][]store.CatalogCountry) premium.InlineKeybo
 	services := store.SortedServices(catalog)
 	rows := make([][]premium.InlineButton, 0, (len(services)+1)/2+1)
 	for i := 0; i < len(services); i += 2 {
-		row := []premium.InlineButton{{Text: services[i], CallbackData: fmt.Sprintf("buy:s:%d", i), Style: "primary", IconCustomEmojiID: premium.AppEmojiID(services[i])}}
+		row := []premium.InlineButton{{Text: services[i], CallbackData: fmt.Sprintf("buy:s:%d", i), Style: "primary", IconCustomEmojiID: catalogServiceEmojiID(services[i], catalog[services[i]])}}
 		if i+1 < len(services) {
-			row = append(row, premium.InlineButton{Text: services[i+1], CallbackData: fmt.Sprintf("buy:s:%d", i+1), Style: "primary", IconCustomEmojiID: premium.AppEmojiID(services[i+1])})
+			row = append(row, premium.InlineButton{Text: services[i+1], CallbackData: fmt.Sprintf("buy:s:%d", i+1), Style: "primary", IconCustomEmojiID: catalogServiceEmojiID(services[i+1], catalog[services[i+1]])})
 		}
 		rows = append(rows, row)
 	}
 	rows = append(rows, []premium.InlineButton{premium.Button("Main Menu", "menu:compact", "primary", "phone")})
 	return premium.InlineKeyboard{InlineKeyboard: rows}
+}
+
+func catalogServiceEmojiID(service string, countries []store.CatalogCountry) string {
+	for _, country := range countries {
+		if country.CustomEmojiID != "" {
+			return country.CustomEmojiID
+		}
+	}
+	return premium.AppEmojiID(service)
+}
+
+func withdrawalMenu(accounts []store.WithdrawalAccount) premium.InlineKeyboard {
+	rows := make([][]premium.InlineButton, 0, len(accounts)+3)
+	for _, account := range accounts {
+		rows = append(rows, []premium.InlineButton{
+			premium.Button(withdrawalMethodLabel(account.Method)+" · "+account.DisplayHint, fmt.Sprintf("wd:use:%d", account.ID), "success", withdrawalMethodIcon(account.Method)),
+			premium.Button("Delete", fmt.Sprintf("wd:delete:%d", account.ID), "danger", "admin"),
+		})
+	}
+	rows = append(rows,
+		[]premium.InlineButton{premium.Button("Add Withdrawal Account", "wd:add", "success", "money")},
+		[]premium.InlineButton{premium.Button("Refresh Balance", "menu:withdraw", "primary", "chart"), premium.Button("Back", "menu:profile", "primary", "phone")},
+	)
+	return premium.InlineKeyboard{InlineKeyboard: rows}
+}
+
+func withdrawalMethodMenu() premium.InlineKeyboard {
+	return premium.InlineKeyboard{InlineKeyboard: [][]premium.InlineButton{
+		{premium.Button("JazzCash", "wd:addmethod:jazzcash", "success", "money"), premium.Button("Easypaisa", "wd:addmethod:easypaisa", "success", "money")},
+		{premium.Button("Binance", "wd:addmethod:binance", "primary", "diamond"), premium.Button("USDT BEP20", "wd:addmethod:usdt_bep20", "primary", "diamond")},
+		{premium.Button("Cancel", "flow:cancel", "danger", "admin"), premium.Button("Accounts", "menu:withdraw", "primary", "money")},
+	}}
+}
+
+func withdrawalConfirmMenu() premium.InlineKeyboard {
+	return premium.InlineKeyboard{InlineKeyboard: [][]premium.InlineButton{
+		{premium.Button("Confirm Request", "wd:confirm", "success", "check"), premium.Button("Cancel", "flow:cancel", "danger", "admin")},
+	}}
+}
+
+func uploadServicesMenu() premium.InlineKeyboard {
+	apps := premium.DefaultApps()
+	rows := make([][]premium.InlineButton, 0, (len(apps)+1)/2+2)
+	for i := 0; i < len(apps); i += 2 {
+		row := []premium.InlineButton{{Text: apps[i].Name, CallbackData: fmt.Sprintf("admin:upload:service:%d", i), Style: "primary", IconCustomEmojiID: apps[i].CustomEmojiID}}
+		if i+1 < len(apps) {
+			row = append(row, premium.InlineButton{Text: apps[i+1].Name, CallbackData: fmt.Sprintf("admin:upload:service:%d", i+1), Style: "primary", IconCustomEmojiID: apps[i+1].CustomEmojiID})
+		}
+		rows = append(rows, row)
+	}
+	rows = append(rows,
+		[]premium.InlineButton{premium.Button("Other App", "admin:upload:service:other", "success", "developer")},
+		[]premium.InlineButton{premium.Button("Cancel Import", "flow:cancel", "danger", "admin")},
+	)
+	return premium.InlineKeyboard{InlineKeyboard: rows}
+}
+
+func uploadPricingMenu() premium.InlineKeyboard {
+	return premium.InlineKeyboard{InlineKeyboard: [][]premium.InlineButton{
+		{premium.Button("Use Defaults", "admin:upload:pricing:default", "success", "check")},
+		{premium.Button("Cancel Import", "flow:cancel", "danger", "admin")},
+	}}
+}
+
+func uploadConfirmMenu() premium.InlineKeyboard {
+	return premium.InlineKeyboard{InlineKeyboard: [][]premium.InlineButton{
+		{premium.Button("Import Numbers", "admin:upload:confirm", "success", "number"), premium.Button("Cancel", "flow:cancel", "danger", "admin")},
+	}}
+}
+
+func panelKindMenu() premium.InlineKeyboard {
+	return premium.InlineKeyboard{InlineKeyboard: [][]premium.InlineButton{
+		{premium.Button("Login Panel", "admin:panel:kind:login", "success", "key"), premium.Button("CR API", "admin:panel:kind:token", "primary", "link")},
+		{premium.Button("Reseller API", "admin:panel:kind:legacy", "primary", "developer"), premium.Button("IVAS WebSocket", "admin:panel:kind:ws", "success", "bolt")},
+		{premium.Button("Cancel", "flow:cancel", "danger", "admin")},
+	}}
+}
+
+func flowCancelMenu(backCallback string) premium.InlineKeyboard {
+	return premium.InlineKeyboard{InlineKeyboard: [][]premium.InlineButton{
+		{premium.Button("Cancel", "flow:cancel", "danger", "admin"), premium.Button("Back", backCallback, "primary", "phone")},
+	}}
+}
+
+func withdrawalMethodLabel(method string) string {
+	switch method {
+	case "jazzcash":
+		return "JazzCash"
+	case "easypaisa":
+		return "Easypaisa"
+	case "binance":
+		return "Binance"
+	case "usdt_bep20":
+		return "USDT BEP20"
+	default:
+		return method
+	}
+}
+
+func withdrawalMethodIcon(method string) string {
+	if method == "binance" || method == "usdt_bep20" {
+		return "diamond"
+	}
+	return "money"
 }
 
 func countriesMenu(serviceIndex int, countries []store.CatalogCountry) premium.InlineKeyboard {
@@ -111,7 +215,8 @@ func panelActionsMenu(panel store.PanelHealth) premium.InlineKeyboard {
 		state, next, style = "Enable", 1, "success"
 	}
 	return premium.InlineKeyboard{InlineKeyboard: [][]premium.InlineButton{
-		{premium.Button(state, fmt.Sprintf("admin:panel:set:%d:%d", panel.ID, next), style, "check"), premium.Button("Refresh", fmt.Sprintf("admin:panel:view:%d", panel.ID), "primary", "chart")},
+		{premium.Button(state, fmt.Sprintf("admin:panel:set:%d:%d", panel.ID, next), style, "check"), premium.Button("Test Now", fmt.Sprintf("admin:panel:test:%d", panel.ID), "primary", "bolt")},
+		{premium.Button("Refresh", fmt.Sprintf("admin:panel:view:%d", panel.ID), "primary", "chart")},
 		{premium.Button("Delete Panel", fmt.Sprintf("admin:panel:delete:%d", panel.ID), "danger", "admin")},
 		{premium.Button("Panel List", "admin:panels", "primary", "chart"), premium.Button("Admin Home", "menu:admin", "primary", "admin")},
 	}}
