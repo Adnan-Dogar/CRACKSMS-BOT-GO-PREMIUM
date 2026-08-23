@@ -36,21 +36,37 @@ The old repositories remain untouched and are used only as migration/behavioral 
 ## First deployment
 
 1. Rotate every token or credential that appeared in the legacy public repositories.
-2. Copy `.env.example` to `.env` and set all values. Generate secrets with:
+2. Run the all-in-one installer and enter the BotFather token plus initial Telegram admin ID when prompted:
+
+   ```bash
+   chmod +x install.sh
+   ./install.sh
+   ```
+
+   The installer can provision supported Linux host packages, generates the PostgreSQL, metrics, and AES-256 secrets, writes `.env` with mode `0600`, builds and starts the containers, runs migrations automatically, and waits for database/bot readiness. Existing secrets are preserved; use `./install.sh --reconfigure` to update settings with an automatic `.env` backup.
+
+   For unattended deployment, provide at least `BOT_TOKEN` and `INITIAL_ADMIN_IDS`:
+
+   ```bash
+   BOT_TOKEN='BotFather-token' INITIAL_ADMIN_IDS='123456789' \
+     ./install.sh --non-interactive
+   ```
+
+3. Manual setup remains available: copy `.env.example` to `.env` and set all values. Generate secrets with:
 
    ```bash
    openssl rand -base64 32   # PANEL_CONFIG_KEY
    openssl rand -hex 32      # METRICS_TOKEN and POSTGRES_PASSWORD
    ```
 
-3. Start PostgreSQL and the bot:
+4. Start PostgreSQL and the bot:
 
    ```bash
    docker compose up --build -d
    docker compose logs -f bot
    ```
 
-4. Add the first OTP destination from the initial admin account:
+5. Add the first OTP destination from the initial admin account:
 
    ```text
    /addgroup -1001234567890|buttons|Main OTP Group

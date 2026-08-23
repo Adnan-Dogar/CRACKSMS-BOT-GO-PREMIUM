@@ -1,5 +1,6 @@
 .git
 .env
+.env.backup.*
 bin
 dist
 coverage.out
