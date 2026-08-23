@@ -129,18 +129,11 @@ The legacy caption remains supported:
 
 Each line or whitespace-separated item in the file is treated as one phone number. Duplicates and invalid values are skipped.
 
-## Custom emoji IDs to replace
+## Custom emoji IDs
 
-Edit `internal/premium/custom_emoji_ids.go`. Replace only the `PUT_REAL_CUSTOM_EMOJI_ID_HERE` values in `replaceCustomEmojiIDs`; handlers and menus do not need editing. The pending keys are:
+All supplied UI custom emoji IDs are centralized in `internal/premium/custom_emoji_ids.go`; `ReplacementEmojiKeys()` now reports no unresolved entries. Exact compound variants such as artist, airplane, envelope, lightning, calendar, inbox, and alert emoji are mapped explicitly instead of falling through to a generic asset. Handlers and menus do not contain duplicated IDs.
 
-```text
-alarm, books, briefcase, calendar, card, deluxe_star, dollar, edit,
-empty_inbox, folder, handshake, home, inbox, laboratory, palette,
-paint, police, plug, puzzle, sparkles, target, telephone, timezone,
-trophy, unmapped_emoji, upload, warning
-```
-
-Until a real ID is entered, the bot uses one verified numeric placeholder custom-emoji ID, so Telegram still receives a custom entity. Built-in country and service IDs are already populated. A custom service created through **Other App** stores the ID entered by the admin and uses it in Get Number buttons and OTP messages.
+Built-in country and service IDs are populated separately in `internal/premium/catalog.go`. A custom service created through **Other App** stores the ID entered by the admin and uses it in Get Number buttons and OTP messages.
 
 ## Graceful legacy migration
 

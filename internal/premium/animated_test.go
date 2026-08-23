@@ -35,14 +35,30 @@ func TestAnimateHTMLWrapsMappedAndUnknownEmoji(t *testing.T) {
 	}
 }
 
-func TestReplacementEmojiKeysAreExplicit(t *testing.T) {
+func TestAllSuppliedReplacementEmojiIDsAreResolved(t *testing.T) {
 	keys := ReplacementEmojiKeys()
-	if len(keys) == 0 {
-		t.Fatal("expected explicit replacement keys")
+	if len(keys) != 0 {
+		t.Fatalf("custom emoji IDs still need replacement: %v", keys)
 	}
-	for _, key := range keys {
-		if ID(key) == "" || !numericCustomEmojiID.MatchString(ID(key)) {
-			t.Fatalf("key %q does not produce a Telegram-safe placeholder ID", key)
+	for key, id := range replaceCustomEmojiIDs {
+		if !numericCustomEmojiID.MatchString(id) || ID(key) != id {
+			t.Fatalf("key %q does not use its resolved Telegram custom emoji ID", key)
+		}
+	}
+}
+
+func TestSuppliedCompoundEmojiUseTheirExactCustomIDs(t *testing.T) {
+	got := AnimateHTML("👩‍🎨 👨‍🎨 ⚡️ ✈️ ✉️ 🚨")
+	for _, id := range []string{
+		"5258215635996908355",
+		"5258450450448915742",
+		"5456140674028019486",
+		"5258073068852485953",
+		"5253742260054409879",
+		"6257780484281997093",
+	} {
+		if !strings.Contains(got, `emoji-id="`+id+`"`) {
+			t.Fatalf("supplied custom emoji ID %s was not rendered: %s", id, got)
 		}
 	}
 }
