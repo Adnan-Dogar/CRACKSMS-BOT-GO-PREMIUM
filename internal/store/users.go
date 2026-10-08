@@ -12,40 +12,48 @@ import (
 )
 
 func (s *Store) AddNumbers(ctx context.Context, service, country, countryCode string, pricePKR, priceUSD float64, perCycle int, phones []string) (int, error) {
+	service, country = strings.TrimSpace(service), strings.TrimSpace(country)
 	if service == "" || country == "" {
 		return 0, errors.New("service and country are required")
 	}
 	if perCycle <= 0 {
 		perCycle = 3
 	}
+	settings := ImportSettings{Services: []ImportService{{Name: service, PricePKR: pricePKR, PriceUSD: priceUSD, PerCycle: perCycle}}}
+	if err := validateImportSettings(settings); err != nil {
+		return 0, err
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback(ctx)
-	_, err = tx.Exec(ctx, `INSERT INTO service_countries(service,country,country_code,price_pkr,price_usd,numbers_per_cycle)
-		VALUES($1,$2,$3,$4,$5,$6)
-		ON CONFLICT(service,country) DO UPDATE SET country_code=EXCLUDED.country_code,
-		price_pkr=EXCLUDED.price_pkr,price_usd=EXCLUDED.price_usd,numbers_per_cycle=EXCLUDED.numbers_per_cycle,enabled=true`,
-		service, country, countryCode, pricePKR, priceUSD, perCycle)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, strings.ToLower(service)); err != nil {
+		return 0, err
+	}
+	var canonical string
+	if e := tx.QueryRow(ctx, `SELECT service FROM service_countries WHERE lower(btrim(service))=lower($1) ORDER BY service LIMIT 1`, service).Scan(&canonical); e == nil {
+		service = canonical
+	} else if !errors.Is(e, pgx.ErrNoRows) {
+		return 0, e
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO service_countries(service,country,country_code,price_pkr,price_usd,numbers_per_cycle) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(service,country) DO UPDATE SET country_code=EXCLUDED.country_code,price_pkr=EXCLUDED.price_pkr,price_usd=EXCLUDED.price_usd,numbers_per_cycle=EXCLUDED.numbers_per_cycle,enabled=true`, service, country, countryCode, pricePKR, priceUSD, perCycle)
 	if err != nil {
 		return 0, err
 	}
-	added := 0
-	for _, phone := range phones {
-		phone = strings.TrimSpace(phone)
-		normalized := NormalizePhone(phone)
-		if len(normalized) < 5 || len(normalized) > 20 {
-			continue
-		}
-		tag, err := tx.Exec(ctx, `INSERT INTO numbers(phone,normalized_phone,service,country)
-			VALUES($1,$2,$3,$4) ON CONFLICT(normalized_phone) DO NOTHING`, phone, normalized, service, country)
-		if err != nil {
-			return 0, err
-		}
-		added += int(tag.RowsAffected())
+	if len(phones) == 0 {
+		return 0, tx.Commit(ctx)
 	}
-	return added, tx.Commit(ctx)
+	numbers := make([]ImportNumber, 0, len(phones))
+	for _, phone := range phones {
+		numbers = append(numbers, ImportNumber{Phone: phone, Country: country, CountryCode: countryCode})
+	}
+	settings.Services[0].Name = service
+	results, err := s.bulkImportNumbers(ctx, tx, 0, 0, settings, numbers, true)
+	if err != nil {
+		return 0, err
+	}
+	return results[0].Added, tx.Commit(ctx)
 }
 
 func (s *Store) Catalog(ctx context.Context) (map[string][]CatalogCountry, error) {
@@ -53,11 +61,11 @@ func (s *Store) Catalog(ctx context.Context) (map[string][]CatalogCountry, error
 }
 
 func (s *Store) CatalogForInstance(ctx context.Context, botInstanceID int64) (map[string][]CatalogCountry, error) {
-	rows, err := s.pool.Query(ctx, `SELECT sc.service,sc.country,sc.country_code,sc.price_pkr,sc.numbers_per_cycle,
+	rows, err := s.pool.Query(ctx, `SELECT sc.service,sc.country,sc.country_code,sc.price_pkr,sc.price_usd,sc.numbers_per_cycle,
 		count(n.id),COALESCE(sp.custom_emoji_id,'')
 		FROM service_countries sc LEFT JOIN numbers n ON n.service=sc.service AND n.country=sc.country AND n.state='available'
 		LEFT JOIN service_profiles sp ON sp.bot_instance_id=$1 AND sp.service_key=lower(sc.service)
-		WHERE sc.enabled GROUP BY sc.service,sc.country,sc.country_code,sc.price_pkr,sc.numbers_per_cycle,sp.custom_emoji_id
+		WHERE sc.enabled GROUP BY sc.service,sc.country,sc.country_code,sc.price_pkr,sc.price_usd,sc.numbers_per_cycle,sp.custom_emoji_id
 		ORDER BY sc.service,sc.country`, instanceID(botInstanceID))
 	if err != nil {
 		return nil, err
@@ -67,7 +75,7 @@ func (s *Store) CatalogForInstance(ctx context.Context, botInstanceID int64) (ma
 	for rows.Next() {
 		var service string
 		var item CatalogCountry
-		if err := rows.Scan(&service, &item.Country, &item.CountryCode, &item.PricePKR, &item.PerCycle, &item.Available, &item.CustomEmojiID); err != nil {
+		if err := rows.Scan(&service, &item.Country, &item.CountryCode, &item.PricePKR, &item.PriceUSD, &item.PerCycle, &item.Available, &item.CustomEmojiID); err != nil {
 			return nil, err
 		}
 		out[service] = append(out[service], item)
@@ -79,6 +87,7 @@ type CatalogCountry struct {
 	Country       string
 	CountryCode   string
 	PricePKR      float64
+	PriceUSD      float64
 	PerCycle      int
 	Available     int
 	CustomEmojiID string
@@ -167,7 +176,7 @@ func (s *Store) createWithdrawalForInstance(ctx context.Context, botInstanceID, 
 	}
 	var id int64
 	if err := tx.QueryRow(ctx, `INSERT INTO withdrawals(bot_instance_id,user_id,account_id,method,amount_pkr,amount_usd,details,details_config)
-		VALUES($1,$2,NULLIF($3,0),$4,$5,$6,$7,$8) RETURNING id`, instanceID(botInstanceID), userID, accountID, method, amountPKR, amountUSD, detailsHint, detailsConfig).Scan(&id); err != nil {
+		VALUES($1,$2,NULLIF($3::bigint,0),$4,$5,$6,$7,$8) RETURNING id`, instanceID(botInstanceID), userID, accountID, method, amountPKR, amountUSD, detailsHint, detailsConfig).Scan(&id); err != nil {
 		return 0, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE users SET balance_pkr=balance_pkr-$2,balance_usd=balance_usd-$3 WHERE id=$1`, userID, amountPKR, amountUSD); err != nil {

@@ -32,7 +32,7 @@ func TestOTPKeyboardCarriesPremiumBotAPIFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	markup := string(raw)
-	for _, field := range []string{`"copy_text":{"text":"123456"}`, `"style":"danger"`, `"style":"success"`, `"style":"primary"`, `"icon_custom_emoji_id"`} {
+	for _, field := range []string{`"copy_text":{"text":"123456"}`, `"style":"success"`, `"style":"primary"`, `"icon_custom_emoji_id"`} {
 		if !strings.Contains(markup, field) {
 			t.Fatalf("premium markup is missing %s: %s", field, markup)
 		}

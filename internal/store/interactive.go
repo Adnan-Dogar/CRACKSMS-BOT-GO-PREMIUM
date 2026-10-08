@@ -177,7 +177,7 @@ func (s *Store) UpsertServiceProfile(ctx context.Context, botInstanceID, created
 		return errors.New("service name and custom emoji ID are required")
 	}
 	_, err := s.pool.Exec(ctx, `INSERT INTO service_profiles(bot_instance_id,service_key,display_name,custom_emoji_id,created_by)
-		VALUES($1,$2,$3,$4,NULLIF($5,0)) ON CONFLICT(bot_instance_id,service_key) DO UPDATE SET
+		VALUES($1,$2,$3,$4,NULLIF($5::bigint,0)) ON CONFLICT(bot_instance_id,service_key) DO UPDATE SET
 		display_name=EXCLUDED.display_name,custom_emoji_id=EXCLUDED.custom_emoji_id,
 		created_by=EXCLUDED.created_by,updated_at=now()`, instanceID(botInstanceID), strings.ToLower(service), service, customEmojiID, createdBy)
 	return err
@@ -199,4 +199,55 @@ func decryptEnvelope(ciphertext []byte, decrypt func(string) ([]byte, error)) (s
 	}
 	plain, err := decrypt(envelope.Encrypted)
 	return string(plain), err
+}
+
+// ClaimTelegramFlow consumes a particular form once, even across processes.
+// Compare decrypted data because each save uses a new encryption nonce.
+func (s *Store) ClaimTelegramFlow(ctx context.Context, botInstanceID, userID int64, expected TelegramFlow) (bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	var kind, step string
+	var raw []byte
+	var expires time.Time
+	err = tx.QueryRow(ctx, `SELECT kind,step,data_config,expires_at FROM telegram_flows
+ WHERE bot_instance_id=$1 AND user_id=$2 AND expires_at>now() FOR UPDATE`, instanceID(botInstanceID), userID).Scan(&kind, &step, &raw, &expires)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if kind != expected.Kind || step != expected.Step || !expires.Equal(expected.ExpiresAt) {
+		return false, nil
+	}
+	var envelope map[string]string
+	if err = json.Unmarshal(raw, &envelope); err != nil {
+		return false, err
+	}
+	plaintext, err := s.cipher.Decrypt(envelope["encrypted"])
+	if err != nil {
+		return false, err
+	}
+	var data map[string]string
+	if err = json.Unmarshal(plaintext, &data); err != nil {
+		return false, err
+	}
+	if len(data) != len(expected.Data) {
+		return false, nil
+	}
+	for key, value := range expected.Data {
+		if actual, ok := data[key]; !ok || actual != value {
+			return false, nil
+		}
+	}
+	if _, err = tx.Exec(ctx, `DELETE FROM telegram_flows WHERE bot_instance_id=$1 AND user_id=$2`, instanceID(botInstanceID), userID); err != nil {
+		return false, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
 }

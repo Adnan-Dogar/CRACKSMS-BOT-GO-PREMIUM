@@ -30,10 +30,23 @@ type Adapter interface {
 func NewAdapter(panel domain.Panel) (Adapter, error) {
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Timeout: 20 * time.Second, Jar: jar}
+	if panel.Kind == "token_api" || panel.Kind == "legacy_api" {
+		client.CheckRedirect = loginRedirectPolicy
+	}
 	switch panel.Kind {
+	case "ivas":
+		if len(panel.Config) == 0 {
+			return nil, ErrProviderAccessRequired
+		}
+		return newIVASAdapter(panel, client), nil
+	case "socketio":
+		return newSocketIOAdapter(panel), nil
+	case "axon_asp", "augestel":
+		return newRESTAdapter(panel, client, nil), nil
 	case "token_api", "legacy_api":
 		return &httpAdapter{panel: panel, client: client}, nil
 	case "login":
+		client.CheckRedirect = loginRedirectPolicy
 		return &loginAdapter{panel: panel, client: client}, nil
 	case "websocket":
 		return &websocketAdapter{panel: panel}, nil
@@ -48,11 +61,15 @@ type httpAdapter struct {
 }
 
 func (a *httpAdapter) Test(ctx context.Context) error {
-	_, _, err := a.Poll(ctx, "")
+	_, _, err := a.poll(ctx, "", 1)
 	return err
 }
 
 func (a *httpAdapter) Poll(ctx context.Context, cursor string) ([]domain.OTPEvent, string, error) {
+	return a.poll(ctx, cursor, min(200, intConfig(a.panel.Config, "records", 200)))
+}
+
+func (a *httpAdapter) poll(ctx context.Context, cursor string, records int) ([]domain.OTPEvent, string, error) {
 	endpoint := stringConfig(a.panel.Config, "url")
 	if endpoint == "" {
 		endpoint = stringConfig(a.panel.Config, "sms_url")
@@ -79,9 +96,9 @@ func (a *httpAdapter) Poll(ctx context.Context, cursor string) ([]domain.OTPEven
 		query.Set("fromdate", now.Add(-24*time.Hour).Format("2006-01-02 15:04:05"))
 		query.Set("todate", now.Format("2006-01-02 15:04:05"))
 	}
-	query.Set("records", strconv.Itoa(intConfig(a.panel.Config, "records", 200)))
-	if cursor != "" {
-		query.Set(defaultString(a.panel.Config, "cursor_param", "cursor"), cursor)
+	query.Set("records", strconv.Itoa(records))
+	if param := stringConfig(a.panel.Config, "cursor_param"); param != "" && cursor != "" {
+		query.Set(param, cursor)
 	}
 	u.RawQuery = query.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
@@ -95,116 +112,12 @@ func (a *httpAdapter) Poll(ctx context.Context, cursor string) ([]domain.OTPEven
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, cursor, fmt.Errorf("panel returned HTTP %d", resp.StatusCode)
+		return nil, cursor, legacyHTTPError(resp)
 	}
 	return decodePanelResponse(resp.Body, a.panel, cursor)
 }
 
 func (a *httpAdapter) Close() error {
-	a.client.CloseIdleConnections()
-	return nil
-}
-
-type loginAdapter struct {
-	panel    domain.Panel
-	client   *http.Client
-	mu       sync.Mutex
-	loggedIn bool
-}
-
-func (a *loginAdapter) Test(ctx context.Context) error {
-	if err := a.login(ctx); err != nil {
-		return err
-	}
-	_, _, err := a.Poll(ctx, "")
-	return err
-}
-
-func (a *loginAdapter) login(ctx context.Context) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	baseURL := strings.TrimRight(stringConfig(a.panel.Config, "base_url"), "/")
-	loginURL := absoluteURL(baseURL, defaultString(a.panel.Config, "login_path", "/login"))
-	if baseURL == "" {
-		return errors.New("base_url is missing")
-	}
-	// Load the form first so cookie/CSRF-based panels can establish a session.
-	var hidden = url.Values{}
-	if req, err := http.NewRequestWithContext(ctx, http.MethodGet, loginURL, nil); err == nil {
-		if resp, getErr := a.client.Do(req); getErr == nil {
-			body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-			resp.Body.Close()
-			hidden = hiddenInputs(body)
-		}
-	}
-	form := hidden
-	form.Set(defaultString(a.panel.Config, "username_field", "username"), stringConfig(a.panel.Config, "username"))
-	form.Set(defaultString(a.panel.Config, "password_field", "password"), stringConfig(a.panel.Config, "password"))
-	action := absoluteURL(baseURL, defaultString(a.panel.Config, "signin_path", "/signin"))
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, action, strings.NewReader(form.Encode()))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	setHeaders(req, a.panel.Config)
-	resp, err := a.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-	lower := strings.ToLower(string(body))
-	if resp.StatusCode < 200 || resp.StatusCode >= 400 || strings.Contains(lower, "invalid password") || strings.Contains(lower, "invalid credentials") {
-		return fmt.Errorf("login failed with HTTP %d", resp.StatusCode)
-	}
-	a.loggedIn = true
-	return nil
-}
-
-func (a *loginAdapter) Poll(ctx context.Context, cursor string) ([]domain.OTPEvent, string, error) {
-	if !a.loggedIn {
-		if err := a.login(ctx); err != nil {
-			return nil, cursor, err
-		}
-	}
-	baseURL := strings.TrimRight(stringConfig(a.panel.Config, "base_url"), "/")
-	endpoint := absoluteURL(baseURL, defaultString(a.panel.Config, "sms_path", "/res/data_smscdr.php"))
-	u, err := url.Parse(endpoint)
-	if err != nil {
-		return nil, cursor, err
-	}
-	query := u.Query()
-	now := time.Now()
-	query.Set("fdate1", now.Add(-24*time.Hour).Format("2006-01-02 15:04:05"))
-	query.Set("fdate2", now.Format("2006-01-02 15:04:05"))
-	query.Set("iDisplayStart", "0")
-	query.Set("iDisplayLength", strconv.Itoa(intConfig(a.panel.Config, "records", 200)))
-	if sessionKey := stringConfig(a.panel.Config, "sesskey"); sessionKey != "" {
-		query.Set("sesskey", sessionKey)
-	}
-	u.RawQuery = query.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return nil, cursor, err
-	}
-	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	setHeaders(req, a.panel.Config)
-	resp, err := a.client.Do(req)
-	if err != nil {
-		return nil, cursor, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		a.loggedIn = false
-		return nil, cursor, fmt.Errorf("session expired: HTTP %d", resp.StatusCode)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, cursor, fmt.Errorf("SMS endpoint returned HTTP %d", resp.StatusCode)
-	}
-	return decodePanelResponse(resp.Body, a.panel, cursor)
-}
-
-func (a *loginAdapter) Close() error {
 	a.client.CloseIdleConnections()
 	return nil
 }
@@ -278,6 +191,22 @@ func decodePanelResponse(reader io.Reader, panel domain.Panel, cursor string) ([
 	if err := decoder.Decode(&payload); err != nil {
 		return nil, cursor, fmt.Errorf("decode panel response: %w", err)
 	}
+	if object, ok := payload.(map[string]any); ok {
+		if failed, ok := object["success"].(bool); ok && !failed {
+			return nil, cursor, errors.New("provider rejected the request")
+		}
+		if status, ok := object["status"].(string); ok && (strings.Contains(strings.ToLower(status), "error") || strings.Contains(strings.ToLower(status), "fail") || strings.Contains(strings.ToLower(status), "invalid") || strings.Contains(strings.ToLower(status), "unauthorized")) {
+			return nil, cursor, errors.New("provider rejected the request")
+		}
+		if detail, ok := object["error"].(string); ok && strings.TrimSpace(detail) != "" {
+			return nil, cursor, errors.New("provider rejected the request")
+		}
+	}
+	if panel.Kind == "token_api" || panel.Kind == "legacy_api" || panel.Kind == "login" {
+		if !recordEnvelope(payload) {
+			return nil, cursor, errors.New("provider response is not a recognized SMS list")
+		}
+	}
 	records := collectRecords(payload)
 	events := make([]domain.OTPEvent, 0, len(records))
 	newCursor := cursor
@@ -296,11 +225,27 @@ func decodePanelResponse(reader io.Reader, panel domain.Panel, cursor string) ([
 		} else if timestamp != nil {
 			dedupPayload = timestamp.UTC().Format(time.RFC3339Nano) + "|" + message
 		}
-		events = append(events, domain.OTPEvent{
+		event := domain.OTPEvent{
 			BotInstanceID: panel.BotInstanceID, PanelID: panel.ID, PanelName: panel.Name, Phone: phone, NormalizedPhone: normalized,
 			Service: service, Message: message, ProviderTimestamp: timestamp, ReceivedAt: time.Now(),
-			DedupKey: store.DedupKey(fmt.Sprintf("%d:%s", panel.ID, panel.Name), normalized, dedupPayload),
-		})
+			LegacyDedupKey: store.DedupKey(fmt.Sprintf("%d:%s", panel.ID, panel.Name), normalized, dedupPayload),
+			DedupKey:       store.DedupKey(fmt.Sprintf("panel:%d", panel.ID), normalized, strings.ToLower(strings.TrimSpace(service))+"|"+dedupPayload),
+		}
+		if fields, ok := record.(map[string]any); ok {
+			event.Sender = firstString(fields, "sender", "source", "cli", "originator")
+			event.Code = firstString(fields, "otp", "code")
+			event.Country = firstString(fields, "country")
+			event.ProviderRecordID = firstString(fields, "id", "message_id")
+			event.DeliveryStatus = firstString(fields, "status")
+			if event.DeliveryStatus != "delivered" && event.DeliveryStatus != "failed" && event.DeliveryStatus != "undelivered" {
+				event.DeliveryStatus = ""
+			}
+			event.ProviderRange = firstString(fields, "range_name", "range")
+		}
+		events = append(events, event)
+	}
+	if (panel.Kind == "token_api" || panel.Kind == "legacy_api" || panel.Kind == "login") && len(records) > 0 && len(events) == 0 {
+		return nil, cursor, errors.New("SMS list contains no recognizable records")
 	}
 	return events, newCursor, nil
 }
@@ -318,7 +263,7 @@ func collectRecords(value any) []any {
 			}
 		}
 		// A WebSocket event may itself be one record.
-		if firstString(value, "phone", "number", "recipient", "num") != "" {
+		if firstString(value, "phone", "number", "recipient", "num", "msisdn") != "" {
 			return []any{value}
 		}
 	}
@@ -331,7 +276,7 @@ func normalizeRecord(value any) (string, string, string, *time.Time, string) {
 		phone := firstString(record, "phone", "number", "recipient", "num", "msisdn")
 		service := firstString(record, "service", "cli", "sender", "originator", "app")
 		message := firstString(record, "message", "text", "body", "content", "sms")
-		timestampText := firstString(record, "datetime", "date", "timestamp", "time", "received_at")
+		timestampText := firstString(record, "datetime", "dt", "date", "timestamp", "time", "received_at")
 		cursor := firstString(record, "id", "cursor", "message_id")
 		return phone, service, message, parseTime(timestampText), cursor
 	case []any:
@@ -427,4 +372,60 @@ func hiddenInputs(body []byte) url.Values {
 		values.Set(string(match[1]), string(match[2]))
 	}
 	return values
+}
+
+var ErrProviderAccessRequired = errors.New("IVAS portal requires session renewal. Paste a current authenticated Socket.IO URL in Edit Credentials")
+
+func SafeError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, ErrProviderAccessRequired) {
+		return err.Error()
+	}
+	var provider *ProviderError
+	if errors.As(err, &provider) {
+		switch provider.Status {
+		case 401:
+			return "Authentication failed. Rotate the token or renew the portal session."
+		case 403:
+			return "Account or token scope is not allowed by the provider."
+		case 429:
+			return "Provider request budget reached. Retry at the scheduled time."
+		case 400:
+			code := provider.Code
+			if len(code) > 80 || !regexp.MustCompile(`^[A-Z0-9_]+$`).MatchString(code) {
+				code = "INVALID_PARAMETERS"
+			}
+			return "Provider rejected the parameters (" + code + ")."
+		}
+	}
+	text := strings.ToLower(err.Error())
+	if strings.Contains(text, "login form") {
+		return "Login form was not found or authentication returned the login page. Check the panel URL and credentials."
+	}
+	if strings.Contains(text, "credential fields") {
+		return "Login fields could not be detected. Configure username/password field overrides."
+	}
+	if strings.Contains(text, "recognized sms list") || strings.Contains(text, "recognizable records") {
+		return "SMS endpoint returned an unexpected response. Check the discovered endpoint or provider format."
+	}
+	if strings.Contains(text, "redirect rejected") || strings.Contains(text, "downgraded login") {
+		return "Provider redirected to a different host or downgraded transport. Check the configured panel URL."
+	}
+	if strings.Contains(text, "403") || strings.Contains(text, "cloudflare") || strings.Contains(text, "challenge") {
+		return "Provider challenge or access restriction. Check supported access / allowlisting."
+	}
+	if strings.Contains(text, "401") || strings.Contains(text, "expired") || strings.Contains(text, "credentials") {
+		return "Authentication failed or session expired. Update credentials."
+	}
+	if strings.Contains(text, "429") {
+		return "Provider rate limit. Retry later."
+	}
+	return "Connection failed. Check the endpoint, credentials, and provider availability."
+}
+
+func providerChallenge(body []byte) bool {
+	v := strings.ToLower(string(body))
+	return strings.Contains(v, "cf-chl-") || strings.Contains(v, "challenge-platform") || strings.Contains(v, "just a moment...") || strings.Contains(v, "verify you are human")
 }

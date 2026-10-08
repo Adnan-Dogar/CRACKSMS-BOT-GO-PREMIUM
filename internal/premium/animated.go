@@ -105,7 +105,7 @@ func AnimateHTML(input string) string {
 						end += nextSize
 					}
 				}
-				out.WriteString(CustomEmoji(ID("unmapped_emoji"), input[index:end]))
+				out.WriteString(input[index:end])
 				index = end
 				continue
 			}

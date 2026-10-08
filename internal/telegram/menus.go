@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"strconv"
 
@@ -12,24 +13,26 @@ import (
 
 func userBackMenu() premium.InlineKeyboard {
 	return premium.InlineKeyboard{InlineKeyboard: [][]premium.InlineButton{{
-		premium.Button("Main Menu", "menu:compact", "primary", "phone"),
+		premium.Button("Main Menu", "menu:home", "primary", "phone"),
 	}}}
 }
 
 func profileMenu() premium.InlineKeyboard {
 	return premium.InlineKeyboard{InlineKeyboard: [][]premium.InlineButton{
+		{premium.Button("My Numbers", "tools:numbers:0", "primary", "phone"), premium.Button("Filter History", "tools:history:24h:all:0", "primary", "history")},
 		{premium.Button("My Stats", "menu:stats", "primary", "chart"), premium.Button("OTP History", "menu:history:0", "success", "history")},
 		{premium.Button("Withdraw", "menu:withdraw", "danger", "money"), premium.Button("Referral", "menu:referral", "success", "link")},
-		{premium.Button("Leaderboard", "menu:top", "primary", "gold"), premium.Button("Main Menu", "menu:compact", "primary", "phone")},
+		{premium.Button("Leaderboard", "menu:top", "primary", "gold"), premium.Button("Main Menu", "menu:home", "primary", "phone")},
 	}}
 }
 
 func settingsMenu() premium.InlineKeyboard {
 	return premium.InlineKeyboard{InlineKeyboard: [][]premium.InlineButton{
+		{premium.Button("Notification Preferences", "tools:notifications", "primary", "bell")},
 		{premium.Button("Choose OTP Theme", "menu:themes", "success", "celebrate")},
 		{premium.Button("Webhooks", "menu:webhooks", "primary", "link"), premium.Button("Scheduling", "menu:schedule", "primary", "settings")},
 		{premium.Button("API Access", "menu:api", "danger", "developer"), premium.Button("Premium Plan", "menu:premium", "success", "premium")},
-		{premium.Button("Main Menu", "menu:compact", "primary", "phone")},
+		{premium.Button("Main Menu", "menu:home", "primary", "phone")},
 	}}
 }
 
@@ -37,13 +40,13 @@ func servicesMenu(catalog map[string][]store.CatalogCountry) premium.InlineKeybo
 	services := store.SortedServices(catalog)
 	rows := make([][]premium.InlineButton, 0, (len(services)+1)/2+1)
 	for i := 0; i < len(services); i += 2 {
-		row := []premium.InlineButton{{Text: services[i], CallbackData: fmt.Sprintf("buy:s:%d", i), Style: "primary", IconCustomEmojiID: catalogServiceEmojiID(services[i], catalog[services[i]])}}
+		row := []premium.InlineButton{{Text: services[i], CallbackData: "buy:service:" + selectionKey(services[i]), Style: "primary", IconCustomEmojiID: catalogServiceEmojiID(services[i], catalog[services[i]])}}
 		if i+1 < len(services) {
-			row = append(row, premium.InlineButton{Text: services[i+1], CallbackData: fmt.Sprintf("buy:s:%d", i+1), Style: "primary", IconCustomEmojiID: catalogServiceEmojiID(services[i+1], catalog[services[i+1]])})
+			row = append(row, premium.InlineButton{Text: services[i+1], CallbackData: "buy:service:" + selectionKey(services[i+1]), Style: "primary", IconCustomEmojiID: catalogServiceEmojiID(services[i+1], catalog[services[i+1]])})
 		}
 		rows = append(rows, row)
 	}
-	rows = append(rows, []premium.InlineButton{premium.Button("Main Menu", "menu:compact", "primary", "phone")})
+	rows = append(rows, []premium.InlineButton{premium.Button("Main Menu", "menu:home", "primary", "phone")})
 	return premium.InlineKeyboard{InlineKeyboard: rows}
 }
 
@@ -96,6 +99,7 @@ func uploadServicesMenu() premium.InlineKeyboard {
 		rows = append(rows, row)
 	}
 	rows = append(rows,
+		[]premium.InlineButton{premium.Button("Select Multiple Apps", "admin:upload:multi", "primary", "app")},
 		[]premium.InlineButton{premium.Button("Other App", "admin:upload:service:other", "success", "developer")},
 		[]premium.InlineButton{premium.Button("Cancel Import", "flow:cancel", "danger", "admin")},
 	)
@@ -118,8 +122,17 @@ func uploadConfirmMenu() premium.InlineKeyboard {
 func panelKindMenu() premium.InlineKeyboard {
 	return premium.InlineKeyboard{InlineKeyboard: [][]premium.InlineButton{
 		{premium.Button("Login Panel", "admin:panel:kind:login", "success", "key"), premium.Button("CR API", "admin:panel:kind:token", "primary", "link")},
-		{premium.Button("Reseller API", "admin:panel:kind:legacy", "primary", "developer"), premium.Button("IVAS WebSocket", "admin:panel:kind:ws", "success", "bolt")},
+		{premium.Button("Reseller API", "admin:panel:kind:legacy", "primary", "developer"), premium.Button("Live SMS Stream", "admin:panel:kind:stream", "success", "live")},
+		{premium.Button("ASP SMS API", "admin:panel:kind:axon_asp", "primary", "plug"), premium.Button("IPRN REST API", "admin:panel:kind:augestel", "primary", "developer")},
 		{premium.Button("Cancel", "flow:cancel", "danger", "admin")},
+	}}
+}
+
+func streamMethodsMenu() premium.InlineKeyboard {
+	return premium.InlineKeyboard{InlineKeyboard: [][]premium.InlineButton{
+		{premium.Button("IVAS Account", "admin:panel:kind:ivas", "primary", "key"), premium.Button("Stream URL", "admin:panel:kind:socketio", "success", "live")},
+		{premium.Button("Plain WebSocket · Advanced", "admin:panel:kind:ws", "primary", "satellite")},
+		{premium.Button("Back", "admin:panel:kind:types", "primary", "back"), premium.Button("Cancel", "flow:cancel", "danger", "cancel")},
 	}}
 }
 
@@ -151,7 +164,7 @@ func withdrawalMethodIcon(method string) string {
 	return "money"
 }
 
-func countriesMenu(serviceIndex int, countries []store.CatalogCountry) premium.InlineKeyboard {
+func countriesMenu(service string, countries []store.CatalogCountry) premium.InlineKeyboard {
 	rows := make([][]premium.InlineButton, 0, (len(countries)+1)/2+1)
 	for i := 0; i < len(countries); i += 2 {
 		label := fmt.Sprintf("%s · %d", countries[i].Country, countries[i].Available)
@@ -159,32 +172,34 @@ func countriesMenu(serviceIndex int, countries []store.CatalogCountry) premium.I
 		if countries[i].Available > 0 {
 			style = "success"
 		}
-		row := []premium.InlineButton{{Text: label, CallbackData: fmt.Sprintf("buy:c:%d:%d", serviceIndex, i), Style: style, IconCustomEmojiID: premium.CountryEmojiID(countries[i].CountryCode)}}
+		row := []premium.InlineButton{{Text: label, CallbackData: "buy:country:" + selectionKey(service) + ":" + selectionKey(countries[i].Country), Style: style, IconCustomEmojiID: premium.CountryEmojiID(countries[i].CountryCode)}}
 		if i+1 < len(countries) {
 			label = fmt.Sprintf("%s · %d", countries[i+1].Country, countries[i+1].Available)
 			style = "primary"
 			if countries[i+1].Available > 0 {
 				style = "success"
 			}
-			row = append(row, premium.InlineButton{Text: label, CallbackData: fmt.Sprintf("buy:c:%d:%d", serviceIndex, i+1), Style: style, IconCustomEmojiID: premium.CountryEmojiID(countries[i+1].CountryCode)})
+			row = append(row, premium.InlineButton{Text: label, CallbackData: "buy:country:" + selectionKey(service) + ":" + selectionKey(countries[i+1].Country), Style: style, IconCustomEmojiID: premium.CountryEmojiID(countries[i+1].CountryCode)})
 		}
 		rows = append(rows, row)
 	}
-	rows = append(rows, []premium.InlineButton{premium.Button("Change Service", "menu:services", "primary", "phone"), premium.Button("Main Menu", "menu:compact", "primary", "phone")})
+	rows = append(rows, []premium.InlineButton{premium.Button("Change Service", "menu:services", "primary", "phone"), premium.Button("Main Menu", "menu:home", "primary", "phone")})
 	return premium.InlineKeyboard{InlineKeyboard: rows}
 }
 
-func assignmentMenu(serviceIndex, countryIndex int) premium.InlineKeyboard {
+func assignmentMenu(service, country string) premium.InlineKeyboard {
 	return premium.InlineKeyboard{InlineKeyboard: [][]premium.InlineButton{
-		{premium.Button("Get More Numbers", fmt.Sprintf("buy:c:%d:%d", serviceIndex, countryIndex), "success", "number")},
-		{premium.Button("Change Country", fmt.Sprintf("buy:s:%d", serviceIndex), "primary", "phone"), premium.Button("Change Service", "menu:services", "primary", "phone")},
-		{premium.Button("My OTPs", "menu:history:0", "success", "otp"), premium.Button("Main Menu", "menu:compact", "primary", "phone")},
+		{premium.Button("Get More Numbers", "buy:country:"+selectionKey(service)+":"+selectionKey(country), "success", "number")},
+		{premium.Button("Save Favorite", "tools:add:"+selectionKey(service)+":"+selectionKey(country), "primary", "favorite"), premium.Button("Watch Availability", "tools:watch:"+selectionKey(service)+":"+selectionKey(country), "primary", "bell")},
+		{premium.Button("Change Country", "buy:service:"+selectionKey(service), "primary", "globe"), premium.Button("Change App", "menu:services", "primary", "app")},
+		{premium.Button("Live OTP", "menu:liveotp", "primary", "live"), premium.Button("Main Menu", "menu:home", "", "home")},
 	}}
 }
 
 func adminNumbersMenu() premium.InlineKeyboard {
 	return premium.InlineKeyboard{InlineKeyboard: [][]premium.InlineButton{
 		{premium.Button("Inventory", "admin:inventory", "primary", "phone"), premium.Button("Upload Numbers", "admin:numbers:upload", "success", "number")},
+		{premium.Button("Import History", "admin:imports:list:0", "primary", "history")},
 		{premium.Button("Statistics", "admin:analytics", "success", "chart"), premium.Button("Back", "menu:admin", "primary", "admin")},
 	}}
 }
@@ -216,6 +231,7 @@ func panelActionsMenu(panel store.PanelHealth) premium.InlineKeyboard {
 	}
 	return premium.InlineKeyboard{InlineKeyboard: [][]premium.InlineButton{
 		{premium.Button(state, fmt.Sprintf("admin:panel:set:%d:%d", panel.ID, next), style, "check"), premium.Button("Test Now", fmt.Sprintf("admin:panel:test:%d", panel.ID), "primary", "bolt")},
+		{premium.Button("Diagnostics & Tools", fmt.Sprintf("admin:panel:diagnostics:%d", panel.ID), "primary", "satellite")},
 		{premium.Button("Refresh", fmt.Sprintf("admin:panel:view:%d", panel.ID), "primary", "chart")},
 		{premium.Button("Delete Panel", fmt.Sprintf("admin:panel:delete:%d", panel.ID), "danger", "admin")},
 		{premium.Button("Panel List", "admin:panels", "primary", "chart"), premium.Button("Admin Home", "menu:admin", "primary", "admin")},
@@ -253,8 +269,8 @@ func groupActionsMenu(group domain.OTPGroupDestination) premium.InlineKeyboard {
 	}
 	return premium.InlineKeyboard{InlineKeyboard: [][]premium.InlineButton{
 		{premium.Button(enabledLabel, fmt.Sprintf("admin:group:enable:%d:%d", group.ChatID, enabledNext), enabledStyle, "check"), premium.Button(buttonLabel, fmt.Sprintf("admin:group:buttons:%d:%d", group.ChatID, buttonNext), buttonStyle, "otp")},
-		{premium.Button("Visible OTP", fmt.Sprintf("admin:group:privacy:%d:visible", group.ChatID), activeStyle(group.OTPVisibility == "visible"), "otp"), premium.Button("Masked OTP", fmt.Sprintf("admin:group:privacy:%d:masked", group.ChatID), activeStyle(group.OTPVisibility == "masked"), "lock")},
-		{premium.Button("Hidden OTP", fmt.Sprintf("admin:group:privacy:%d:hidden", group.ChatID), activeStyle(group.OTPVisibility == "hidden"), "lock")},
+		{premium.Button("Visible display", fmt.Sprintf("admin:group:privacy:%d:visible", group.ChatID), activeStyle(group.OTPVisibility == "visible"), "otp"), premium.Button("Masked display", fmt.Sprintf("admin:group:privacy:%d:masked", group.ChatID), activeStyle(group.OTPVisibility == "masked"), "lock")},
+		{premium.Button("Hidden display", fmt.Sprintf("admin:group:privacy:%d:hidden", group.ChatID), activeStyle(group.OTPVisibility == "hidden"), "lock")},
 		{premium.Button("Choose Theme", fmt.Sprintf("admin:group:themes:%d", group.ChatID), "primary", "celebrate"), premium.Button("Delete Group", fmt.Sprintf("admin:group:delete:%d", group.ChatID), "danger", "admin")},
 		{premium.Button("Group List", "admin:groups", "primary", "channel"), premium.Button("Admin Home", "menu:admin", "primary", "admin")},
 	}}
@@ -286,6 +302,7 @@ func adminRewardsMenu(schedules []domain.RewardSchedule) premium.InlineKeyboard 
 	}
 	rows = append(rows,
 		[]premium.InlineButton{premium.Button("Set Rewards", "admin:reward:set", "success", "money"), premium.Button("Refresh", "admin:rewards", "primary", "chart")},
+		[]premium.InlineButton{premium.Button("Limited Reward", "admin:reward:limited", "success", "gift")},
 		[]premium.InlineButton{premium.Button("Back", "menu:admin", "primary", "admin")},
 	)
 	return premium.InlineKeyboard{InlineKeyboard: rows}
@@ -396,12 +413,20 @@ func botActionsMenu(item domain.BotInstance) premium.InlineKeyboard {
 			[]premium.InlineButton{premium.Button("Approve Enterprise", fmt.Sprintf("admin:bot:approve:%d:enterprise", item.ID), "success", "gold"), premium.Button("Reject", fmt.Sprintf("admin:bot:reject:%d", item.ID), "danger", "admin")},
 		)
 	} else {
+		if item.Status == "error" {
+			rows = append(rows, []premium.InlineButton{premium.Button("Retry Connection", fmt.Sprintf("admin:bot:set:%d:1", item.ID), "success", "refresh")})
+		}
 		label, next, style := "Stop Bot", 0, "danger"
 		if !item.Enabled {
 			label, next, style = "Start Bot", 1, "success"
 		}
 		rows = append(rows, []premium.InlineButton{premium.Button(label, fmt.Sprintf("admin:bot:set:%d:%d", item.ID, next), style, "bot")})
 	}
+	label, next, style := "Enable Main OTP Sharing", 1, "success"
+	if item.ShareMainOTPs {
+		label, next, style = "Disable Main OTP Sharing", 0, "danger"
+	}
+	rows = append(rows, []premium.InlineButton{premium.Button(label, fmt.Sprintf("admin:bot:otpshare:%d:%d", item.ID, next), style, "otp")})
 	rows = append(rows,
 		[]premium.InlineButton{premium.Button("Refresh", fmt.Sprintf("admin:bot:view:%d", item.ID), "primary", "chart"), premium.Button("Bot List", "admin:bots", "primary", "bot")},
 		[]premium.InlineButton{premium.Button("Admin Home", "menu:admin", "primary", "admin")},
@@ -507,3 +532,6 @@ func parseCallbackInt(value string) (int64, bool) {
 	id, err := strconv.ParseInt(value, 10, 64)
 	return id, err == nil
 }
+
+// Stable across catalog insertion, deletion and reordering.
+func selectionKey(value string) string { return fmt.Sprintf("%x", sha256.Sum256([]byte(value)))[:24] }

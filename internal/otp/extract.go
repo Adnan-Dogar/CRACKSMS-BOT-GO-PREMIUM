@@ -40,6 +40,17 @@ func Extract(message string) string {
 	}
 	return ""
 }
+func ValidCode(code string) bool {
+	if len(code) < 4 || len(code) > 9 {
+		return false
+	}
+	for _, r := range code {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
 
 func ExtractWithCustom(message string, custom []string) string {
 	if code := Extract(message); code != "" {

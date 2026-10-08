@@ -8,7 +8,7 @@ import (
 func TestAnimateHTMLOnlyRewritesSafeTextNodes(t *testing.T) {
 	input := `🔥 <b>📊 Stats</b> <code>🔑 literal</code> <tg-emoji emoji-id="999">📱</tg-emoji>`
 	got := AnimateHTML(input)
-	if !strings.Contains(got, `<tg-emoji emoji-id="5773906538459573336">🔥</tg-emoji>`) {
+	if !strings.Contains(got, `<tg-emoji emoji-id="`+ID("fire")+`">🔥</tg-emoji>`) {
 		t.Fatalf("fire was not animated: %s", got)
 	}
 	if !strings.Contains(got, `<b><tg-emoji emoji-id="`+ID("chart")+`">📊</tg-emoji> Stats</b>`) {
@@ -22,16 +22,16 @@ func TestAnimateHTMLOnlyRewritesSafeTextNodes(t *testing.T) {
 	}
 }
 
-func TestAnimateHTMLWrapsMappedAndUnknownEmoji(t *testing.T) {
+func TestAnimateHTMLWrapsMappedAndPreservesUnknownEmoji(t *testing.T) {
 	got := AnimateHTML("💳 📂 🥳")
-	if strings.Count(got, "<tg-emoji ") != 3 {
-		t.Fatalf("all visible emoji must be custom entities: %s", got)
+	if strings.Count(got, "<tg-emoji ") != 2 {
+		t.Fatalf("known icons must animate: %s", got)
 	}
 	if !strings.Contains(got, `emoji-id="`+ID("card")+`"`) || !strings.Contains(got, `emoji-id="`+ID("folder")+`"`) {
 		t.Fatalf("replacement keys were not used: %s", got)
 	}
-	if !strings.Contains(got, `emoji-id="`+ID("unmapped_emoji")+`"`) {
-		t.Fatalf("unknown emoji did not use the centralized fallback key: %s", got)
+	if !strings.HasSuffix(got, "🥳") {
+		t.Fatalf("unknown emoji changed: %s", got)
 	}
 }
 

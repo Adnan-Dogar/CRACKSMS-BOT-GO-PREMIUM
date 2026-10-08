@@ -16,8 +16,8 @@ func (s *Store) ReplaceRewardSchedule(ctx context.Context, name string, userID *
 	}
 	seen := map[int]bool{}
 	for _, rule := range rules {
-		if rule.Threshold <= 0 || rule.AmountPKR <= 0 {
-			return 0, errors.New("reward threshold and amount must be positive")
+		if rule.Threshold <= 0 || rule.MaxUsers < 0 || rule.AmountPKR < 0 || rule.AmountUSD < 0 || (rule.AmountPKR == 0 && rule.AmountUSD == 0) {
+			return 0, errors.New("reward threshold and amount must be positive; user limit cannot be negative")
 		}
 		if seen[rule.Threshold] {
 			return 0, fmt.Errorf("duplicate threshold %d", rule.Threshold)
@@ -46,8 +46,8 @@ func (s *Store) ReplaceRewardSchedule(ctx context.Context, name string, userID *
 		return 0, err
 	}
 	for _, rule := range rules {
-		if _, err := tx.Exec(ctx, `INSERT INTO reward_rules(schedule_id,threshold,reward_pkr) VALUES($1,$2,$3)`,
-			scheduleID, rule.Threshold, rule.AmountPKR); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO reward_rules(schedule_id,threshold,reward_pkr,reward_usd,max_users) VALUES($1,$2,$3,$4,$5)`,
+			scheduleID, rule.Threshold, rule.AmountPKR, rule.AmountUSD, rule.MaxUsers); err != nil {
 			return 0, err
 		}
 	}
@@ -72,13 +72,13 @@ func (s *Store) ListRewardSchedules(ctx context.Context) ([]domain.RewardSchedul
 		if err := rows.Scan(&schedule.ID, &schedule.Name, &schedule.UserID, &schedule.Enabled, &schedule.EffectiveFrom); err != nil {
 			return nil, err
 		}
-		ruleRows, err := s.pool.Query(ctx, `SELECT threshold,reward_pkr FROM reward_rules WHERE schedule_id=$1 ORDER BY threshold`, schedule.ID)
+		ruleRows, err := s.pool.Query(ctx, `SELECT threshold,reward_pkr,reward_usd,max_users FROM reward_rules WHERE schedule_id=$1 ORDER BY threshold`, schedule.ID)
 		if err != nil {
 			return nil, err
 		}
 		for ruleRows.Next() {
 			var rule domain.RewardRule
-			if err := ruleRows.Scan(&rule.Threshold, &rule.AmountPKR); err != nil {
+			if err := ruleRows.Scan(&rule.Threshold, &rule.AmountPKR, &rule.AmountUSD, &rule.MaxUsers); err != nil {
 				ruleRows.Close()
 				return nil, err
 			}

@@ -54,6 +54,9 @@ func (s *Service) worker(ctx context.Context, workerID int) {
 			continue
 		}
 		event := job.Event
+		if !ValidCode(event.Code) {
+			event.Code = ""
+		}
 		s.metrics.Received.Add(1)
 		if event.NormalizedPhone == "" {
 			event.NormalizedPhone = store.NormalizePhone(event.Phone)
@@ -68,6 +71,20 @@ func (s *Service) worker(ctx context.Context, workerID int) {
 		}
 		if event.DedupKey == "" {
 			event.DedupKey = store.DedupKey(event.PanelName, event.NormalizedPhone, event.Message)
+		}
+		if event.PanelID != 0 && event.Code != "" {
+			resolved, resolveErr := s.store.ResolveEventService(ctx, &event)
+			if resolveErr == nil && !resolved {
+				resolveErr = s.store.HoldUnmappedEvent(ctx, event)
+			}
+			if resolveErr != nil {
+				_ = s.store.CompleteIngestJob(ctx, job, resolveErr)
+				continue
+			}
+			if !resolved {
+				_ = s.store.CompleteIngestJob(ctx, job, nil)
+				continue
+			}
 		}
 		result, err := s.store.AcceptOTP(ctx, event)
 		if err != nil {

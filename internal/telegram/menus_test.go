@@ -21,8 +21,8 @@ func TestPremiumMenuCoverageAndFields(t *testing.T) {
 		"profile":          profileMenu(),
 		"settings":         settingsMenu(),
 		"services":         servicesMenu(map[string][]store.CatalogCountry{"WhatsApp": {{Country: "Pakistan", CountryCode: "PK", Available: 3}}}),
-		"countries":        countriesMenu(0, []store.CatalogCountry{{Country: "Pakistan", CountryCode: "PK", Available: 3}}),
-		"assignment":       assignmentMenu(0, 0),
+		"countries":        countriesMenu("WhatsApp", []store.CatalogCountry{{Country: "Pakistan", CountryCode: "PK", Available: 3}}),
+		"assignment":       assignmentMenu("WhatsApp", "Pakistan"),
 		"withdraw_user":    withdrawalMenu([]store.WithdrawalAccount{{ID: 3, Method: "jazzcash", DisplayHint: "0300•••567"}}),
 		"withdraw_method":  withdrawalMethodMenu(),
 		"withdraw_confirm": withdrawalConfirmMenu(),
@@ -90,7 +90,7 @@ func TestServiceAndCountryButtonsUseLegacyCustomIDs(t *testing.T) {
 	if service.IconCustomEmojiID != "5334998226636390258" {
 		t.Fatalf("service ID=%q", service.IconCustomEmojiID)
 	}
-	country := countriesMenu(0, []store.CatalogCountry{{Country: "Pakistan", CountryCode: "PK", Available: 1}}).InlineKeyboard[0][0]
+	country := countriesMenu("WhatsApp", []store.CatalogCountry{{Country: "Pakistan", CountryCode: "PK", Available: 1}}).InlineKeyboard[0][0]
 	if country.IconCustomEmojiID != "5224637061985742245" {
 		t.Fatalf("country ID=%q", country.IconCustomEmojiID)
 	}

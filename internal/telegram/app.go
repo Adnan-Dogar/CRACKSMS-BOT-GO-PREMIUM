@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"html"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -19,25 +18,35 @@ import (
 	"github.com/adnan-dogar/cracksms-vnext/internal/panels"
 	"github.com/adnan-dogar/cracksms-vnext/internal/premium"
 	"github.com/adnan-dogar/cracksms-vnext/internal/store"
+	"github.com/adnan-dogar/cracksms-vnext/internal/tgtransport"
 	"github.com/adnan-dogar/cracksms-vnext/internal/themes"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/jackc/pgx/v5"
 )
 
 type App struct {
-	bot           *tgbotapi.BotAPI
-	store         *store.Store
-	botInstanceID int64
-	isMain        bool
-	holdDuration  time.Duration
-	location      *time.Location
-	workerCount   int
-	rateMu        sync.Mutex
-	rateWindow    map[int64][]time.Time
-	links         themes.Links
+	bot             *tgbotapi.BotAPI
+	store           *store.Store
+	botInstanceID   int64
+	isMain          bool
+	holdDuration    time.Duration
+	reuseCooldown   time.Duration
+	group           *groupInteraction
+	location        *time.Location
+	workerCount     int
+	screenChatID    int64
+	screenMessageID int
+	rateMu          *sync.Mutex
+	rateWindow      map[int64][]time.Time
+	links           themes.Links
+	ui              *uiRuntime
+	displayFormat   string
+	lastMessageID   int
+	fileClient      tgbotapi.HTTPClient
 }
 
-func (a *App) SetLinks(links themes.Links) { a.links = links }
+func (a *App) SetLinks(links themes.Links)      { a.links = links }
+func (a *App) SetReuseCooldown(v time.Duration) { a.reuseCooldown = v }
 
 func New(bot *tgbotapi.BotAPI, repo *store.Store, holdDuration time.Duration, location *time.Location) *App {
 	return NewForInstance(bot, repo, store.MainBotInstanceID, true, holdDuration, location)
@@ -45,44 +54,100 @@ func New(bot *tgbotapi.BotAPI, repo *store.Store, holdDuration time.Duration, lo
 
 func NewForInstance(bot *tgbotapi.BotAPI, repo *store.Store, botInstanceID int64, isMain bool, holdDuration time.Duration, location *time.Location) *App {
 	return &App{bot: bot, store: repo, botInstanceID: botInstanceID, isMain: isMain, holdDuration: holdDuration,
-		location: location, workerCount: 32, rateWindow: map[int64][]time.Time{}}
+		location: location, reuseCooldown: 24 * time.Hour, workerCount: 32, rateMu: &sync.Mutex{}, rateWindow: map[int64][]time.Time{}, ui: newUIRuntime(), fileClient: &http.Client{Timeout: 30 * time.Second}}
 }
 
 func (a *App) Run(ctx context.Context) error {
-	updateConfig := tgbotapi.NewUpdate(0)
-	updateConfig.Timeout = 30
-	updates := a.bot.GetUpdatesChan(updateConfig)
-	queue := make(chan tgbotapi.Update, 1000)
+	bot := *a.bot
+	bot.Client = contextClient{ctx: ctx, client: bot.Client}
+	a.bot = &bot
+	if err := a.registerCommands(ctx); err != nil {
+		slog.Warn("register Telegram commands", "bot_instance", a.botInstanceID, "error_type", fmt.Sprintf("%T", err))
+	}
+	if err := a.store.PauseLiveScreens(ctx, a.botInstanceID); err != nil {
+		return err
+	}
+	go a.runLiveScreens(ctx)
+	backupCtx, cancelBackups := context.WithCancel(ctx)
+	var backups sync.WaitGroup
+	if a.isMain {
+		backups.Add(1)
+		go func() { defer backups.Done(); a.runUserBackups(backupCtx) }()
+	}
+	defer func() { cancelBackups(); backups.Wait() }()
+	importCtx, cancelImports := context.WithCancel(ctx)
+	importsDone := make(chan struct{})
+	go func() {
+		defer close(importsDone)
+		a.runImports(importCtx)
+	}()
+	defer func() {
+		cancelImports()
+		<-importsDone
+	}()
+	queues := make([]chan incomingUpdate, a.workerCount)
 	var workers sync.WaitGroup
-	for i := 0; i < a.workerCount; i++ {
+	for i := range queues {
+		queues[i] = make(chan incomingUpdate, 100)
 		workers.Add(1)
-		go func() {
+		go func(queue <-chan incomingUpdate) {
 			defer workers.Done()
 			for update := range queue {
-				a.handleUpdate(ctx, update)
+				a.handleUpdate(context.WithValue(ctx, entityContextKey{}, update), update.Update)
 			}
-		}()
+		}(queues[i])
 	}
-	defer func() { close(queue); workers.Wait() }()
-	for {
-		select {
-		case <-ctx.Done():
-			a.bot.StopReceivingUpdates()
-			return nil
-		case update, ok := <-updates:
-			if !ok {
-				return errors.New("Telegram updates channel closed")
+	defer func() {
+		for _, queue := range queues {
+			close(queue)
+		}
+		workers.Wait()
+	}()
+	offset := 0
+	for ctx.Err() == nil {
+		updates, err := a.pollUpdates(ctx, offset)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
 			}
+			slog.Warn("Telegram polling unavailable", "bot_instance", a.botInstanceID, "error_type", fmt.Sprintf("%T", err))
+			delay := time.NewTimer(3 * time.Second)
 			select {
-			case queue <- update:
+			case <-ctx.Done():
+				delay.Stop()
+				return nil
+			case <-delay.C:
+			}
+			continue
+		}
+		for _, update := range updates {
+			select {
+			case queues[updateShard(update.Update, len(queues))] <- update:
+				offset = update.Update.UpdateID + 1
 			case <-ctx.Done():
 				return nil
 			}
 		}
 	}
+	return nil
 }
 
 func (a *App) handleUpdate(ctx context.Context, update tgbotapi.Update) {
+	userID := updateUser(update)
+	lock := a.userLock(userID)
+	lock.Lock()
+	defer lock.Unlock()
+	request := *a
+	a = &request
+	a.bot = tgtransport.InteractiveBot(ctx, a.bot)
+	if !a.prepareGroupInteraction(ctx, update) {
+		return
+	}
+	a.updatePreferences(ctx, userID)
+	keepLive := update.CallbackQuery != nil && (strings.HasPrefix(update.CallbackQuery.Data, "live:") || strings.HasPrefix(update.CallbackQuery.Data, "activity:"))
+	if !keepLive && a.group == nil {
+		a.pauseLive(ctx, userID)
+	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			slog.Error("Telegram handler panic", "panic", recovered)
@@ -93,32 +158,57 @@ func (a *App) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 		return
 	}
 	message := update.Message
-	if message == nil || message.From == nil || message.Chat == nil || !message.Chat.IsPrivate() {
+	if message == nil || message.From == nil || message.Chat == nil || (!message.Chat.IsPrivate() && a.group == nil) {
 		return
 	}
 	if err := a.store.EnsureUserForInstance(ctx, a.botInstanceID, message.From.ID, message.From.UserName, message.From.FirstName, message.From.LastName); err != nil {
 		slog.Error("ensure user", "error", err)
 		return
 	}
+	blocked, blockErr := a.store.UserBlocked(ctx, message.From.ID)
+	if blockErr != nil || blocked {
+		return
+	}
 	admin, _ := a.store.HasAnyAdminRole(ctx, a.botInstanceID, message.From.ID)
+	if a.group != nil {
+		_ = a.syncGroupCommands(ctx, message.Chat.ID, message.From.ID)
+	}
+	if a.group != nil && !groupCommandAllowed(message.Command()) {
+		a.privateHandoff(message.Chat.ID, message.Command())
+		return
+	}
+	if admin {
+		_ = a.syncCommandMenu(ctx, message.From.ID)
+	}
 	if !admin && a.rateLimited(message.From.ID) {
 		a.sendHTML(message.Chat.ID, "⏳ Too many requests. Please slow down for a moment.", nil)
 		return
 	}
 	if !admin && message.Command() != "start" {
-		if missing, err := a.missingRequiredChats(ctx, message.From.ID); err == nil && len(missing) > 0 {
+		missing, err := a.missingRequiredChats(ctx, message.From.ID)
+		if err != nil {
+			a.sendError(message.Chat.ID, err)
+			return
+		}
+		if len(missing) > 0 {
 			a.sendJoinRequired(message.Chat.ID, missing)
 			return
 		}
 	}
+	if a.group == nil && a.handleBroadcastMessage(ctx, message) {
+		return
+	}
 	if message.Document != nil {
+		if a.handleUserBackupDocument(ctx, message) {
+			return
+		}
 		if a.handleInteractiveDocument(ctx, message, admin) {
 			return
 		}
 		a.handleDocument(ctx, message, admin)
 		return
 	}
-	if a.handleFlowText(ctx, message, admin) {
+	if a.group == nil && a.handleFlowText(ctx, message, admin) {
 		return
 	}
 	if !message.IsCommand() {
@@ -127,12 +217,37 @@ func (a *App) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 	}
 	command := strings.ToLower(message.Command())
 	args := strings.TrimSpace(message.CommandArguments())
+	if a.handleProviderCommand(ctx, message, command, args) {
+		return
+	}
+	if a.handleDailyCommand(ctx, message, command, args) {
+		return
+	}
+	if a.handleCommandEntry(ctx, message, command, args) {
+		return
+	}
 	if admin && a.handleAdminCommand(ctx, message, command, args) {
 		return
 	}
 	switch command {
+	case "admin":
+		a.sendAdminDashboard(ctx, message.Chat.ID, message.From.ID)
+	case "cancel":
+		_ = a.clearNavigationFlow(ctx, message.From.ID)
+		a.sendHTML(message.Chat.ID, "Action cancelled.", compactMenu(admin, a.isMain))
 	case "start":
+		_ = a.clearNavigationFlow(ctx, message.From.ID)
 		a.handleStart(ctx, message, args, admin)
+	case "liveotp":
+		a.startLive(ctx, message.Chat.ID, message.From.ID, "private", args, 0, false)
+	case "topapps":
+		a.startLive(ctx, message.Chat.ID, message.From.ID, "apps", args, 0, false)
+	case "topcountries":
+		a.startLive(ctx, message.Chat.ID, message.From.ID, "topcountries", args, 0, false)
+	case "favorites", "alerts":
+		a.showSavedSelections(ctx, message.Chat.ID, message.From.ID, command == "alerts", 0)
+	case "lastselection":
+		a.showRepeatSelection(ctx, message.Chat.ID, message.From.ID)
 	case "help":
 		a.handleHelp(message.Chat.ID, admin)
 	case "services":
@@ -177,12 +292,22 @@ func (a *App) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 }
 
 func (a *App) handleStart(ctx context.Context, message *tgbotapi.Message, args string, admin bool) {
+	if message.Chat.IsPrivate() && strings.HasPrefix(args, "open_") {
+		command := strings.TrimPrefix(args, "open_")
+		if command != "start" && a.handleCommandEntry(ctx, message, command, "") {
+			return
+		}
+	}
 	if strings.HasPrefix(args, "ref") {
 		if referrerID, err := strconv.ParseInt(strings.TrimPrefix(args, "ref"), 10, 64); err == nil {
 			_ = a.store.RegisterReferral(ctx, message.From.ID, referrerID)
 		}
 	}
-	missing, _ := a.missingRequiredChats(ctx, message.From.ID)
+	missing, err := a.missingRequiredChats(ctx, message.From.ID)
+	if err != nil {
+		a.sendError(message.Chat.ID, err)
+		return
+	}
 	if !admin && len(missing) > 0 {
 		a.sendJoinRequired(message.Chat.ID, missing)
 		return
@@ -195,17 +320,11 @@ func (a *App) handleStart(ctx context.Context, message *tgbotapi.Message, args s
 	if strings.EqualFold(name, "Adnan") {
 		greeting = "Walaikum Assalam Adnan Bhai"
 	}
-	text := fmt.Sprintf("👋 <b>%s</b>\n\nWelcome to the premium OTP management bot. Choose a command below.", html.EscapeString(greeting))
-	a.sendHTML(message.Chat.ID, text, compactMenu(admin, a.isMain))
+	text := fmt.Sprintf("👋 <b>%s</b>\n\nWelcome to <b>CrackSMS</b>.\nGet numbers, view your OTPs, and manage your account using the buttons below.", html.EscapeString(greeting))
+	a.sendHTML(message.Chat.ID, text, a.homeMenu(ctx, message.From.ID, admin))
 }
 
-func (a *App) handleHelp(chatID int64, admin bool) {
-	text := "<b>User commands</b>\n/services — available inventory\n/getnumber Service|Country — assign numbers for 20 minutes\n/mystats, /myhistory — analytics and OTP history\n/theme 0-9, /otpguipreview — premium OTP themes\n/premium — tier and feature access\n/webhook, /schedule, /apikey — Pro/Enterprise integrations\n/tutorials, /settings — guides and preferences\n/balance, /top, /referral, /withdraw\n/createbot Name|token — submit an encrypted child-bot request"
-	if admin {
-		text += "\n\n<b>Admin commands</b>\n/addgroup, /groups, /groupbuttons, /groupprivacy, /grouptheme, /groupenable, /removegroup\n/setrewards, /rewards, /clearreward, /settier\n/addpanel, /panels, /paneltoggle\n/patternadd, /patterns, /patternremove\n/tutorialadd, /tutorialremove\n/botinstances, /botapprove, /botreject, /bottoggle\nUpload .txt with /addnumbers caption\n/addrequired, /required, /removerequired\n/addadmin user|permissions, /removeadmin\n/withdrawapprove, /withdrawreject, /broadcast, /systemstats"
-	}
-	a.sendHTML(chatID, text, compactMenu(admin, a.isMain))
-}
+func (a *App) handleHelp(chatID int64, admin bool) { a.helpHome(chatID, admin) }
 
 func (a *App) handleServices(ctx context.Context, chatID int64) {
 	catalog, err := a.store.CatalogForInstance(ctx, a.botInstanceID)
@@ -225,11 +344,15 @@ func (a *App) handleServices(ctx context.Context, chatID int64) {
 			fmt.Fprintf(&text, "• %s — %d available — %.2f PKR\n", html.EscapeString(country.Country), country.Available, country.PricePKR)
 		}
 	}
-	text.WriteString("\nUse <code>/getnumber Service|Country</code>")
+	text.WriteString("\nChoose a service below, then choose its country.")
 	a.sendHTML(chatID, text.String(), servicesMenu(catalog))
 }
 
 func (a *App) handleGetNumber(ctx context.Context, message *tgbotapi.Message, args string) {
+	if args == "" {
+		a.handleServices(ctx, message.Chat.ID)
+		return
+	}
 	parts := splitExact(args, "|", 2)
 	if len(parts) != 2 {
 		a.sendHTML(message.Chat.ID, "Usage: <code>/getnumber Service|Country</code>", nil)
@@ -241,6 +364,23 @@ func (a *App) handleGetNumber(ctx context.Context, message *tgbotapi.Message, ar
 		return
 	}
 	limit := 3
+	validSelection := false
+	for service, countries := range catalog {
+		if !strings.EqualFold(service, parts[0]) {
+			continue
+		}
+		for _, c := range countries {
+			if strings.EqualFold(c.Country, parts[1]) {
+				parts[0], parts[1] = service, c.Country
+				validSelection = true
+				break
+			}
+		}
+	}
+	if !validSelection {
+		a.sendHTML(message.Chat.ID, "This application and country are no longer configured. Choose a current selection.", servicesBackMenu())
+		return
+	}
 	if countries, ok := catalog[parts[0]]; ok {
 		for _, country := range countries {
 			if strings.EqualFold(country.Country, parts[1]) {
@@ -249,9 +389,17 @@ func (a *App) handleGetNumber(ctx context.Context, message *tgbotapi.Message, ar
 			}
 		}
 	}
+	override, e := a.store.AssignmentLimit(ctx, a.botInstanceID)
+	if e != nil {
+		a.sendError(message.Chat.ID, e)
+		return
+	}
+	if override > 0 {
+		limit = override
+	}
 	assignment, err := a.store.AssignNumbersForInstance(ctx, a.botInstanceID, message.From.ID, parts[0], parts[1], limit, a.holdDuration)
 	if errors.Is(err, store.ErrNoNumbers) {
-		a.sendHTML(message.Chat.ID, "No eligible numbers are available. Recycled numbers may still be in your 24-hour personal cooldown.", nil)
+		a.sendHTML(message.Chat.ID, "No eligible numbers are available. Recycled numbers may still be in your 24-hour personal cooldown.", premium.InlineKeyboard{InlineKeyboard: [][]premium.InlineButton{{premium.Button("Watch Availability", "tools:watch:"+selectionKey(parts[0])+":"+selectionKey(parts[1]), "primary", "bell")}, {premium.Button("Choose Application", "menu:services", "primary", "app"), premium.Button("Home", "menu:home", "", "home")}}})
 		return
 	}
 	if err != nil {
@@ -266,24 +414,10 @@ func (a *App) handleGetNumber(ctx context.Context, message *tgbotapi.Message, ar
 	}
 	fmt.Fprintf(&text, "\n⏳ Expires: <b>%s</b>\nNumbers with no OTP return automatically; the first valid OTP consumes its number.",
 		assignment.ExpiresAt.In(a.location).Format("03:04:05 PM"))
-	serviceIndex, countryIndex := -1, -1
-	for i, service := range store.SortedServices(catalog) {
-		if service != parts[0] {
-			continue
-		}
-		serviceIndex = i
-		for j, item := range catalog[service] {
-			if strings.EqualFold(item.Country, parts[1]) {
-				countryIndex = j
-				break
-			}
-		}
-		break
+	if err := a.store.SaveLastSelection(ctx, a.botInstanceID, message.From.ID, parts[0], parts[1]); err != nil {
+		slog.Warn("save last selection", "error_type", fmt.Sprintf("%T", err))
 	}
-	var markup any = userBackMenu()
-	if serviceIndex >= 0 && countryIndex >= 0 {
-		markup = assignmentMenu(serviceIndex, countryIndex)
-	}
+	markup := assignmentMenu(parts[0], parts[1])
 	a.sendHTML(message.Chat.ID, text.String(), markup)
 }
 
@@ -350,6 +484,12 @@ func (a *App) handleWithdraw(ctx context.Context, message *tgbotapi.Message, arg
 }
 
 func (a *App) handleAdminCommand(ctx context.Context, message *tgbotapi.Message, command, args string) bool {
+	for _, definition := range commandRegistry {
+		if definition.Name == command && definition.MainOnly && !a.isMain {
+			a.sendHTML(message.Chat.ID, "This administration command is available in the main bot.", userBackMenu())
+			return true
+		}
+	}
 	if permission := adminCommandPermission(command); permission != "" {
 		allowed, err := a.store.HasAdminPermission(ctx, a.botInstanceID, message.From.ID, permission)
 		if err != nil || !allowed {
@@ -389,7 +529,7 @@ func (a *App) handleAdminCommand(ctx context.Context, message *tgbotapi.Message,
 			return true
 		}
 		err = a.store.UpsertOTPGroup(ctx, domain.OTPGroupDestination{
-			BotInstanceID: a.botInstanceID, ChatID: chatID, Title: title, ButtonsEnabled: buttons, Enabled: true, OTPVisibility: "visible",
+			BotInstanceID: a.botInstanceID, ChatID: chatID, Title: title, ButtonsEnabled: buttons, Enabled: true, OTPVisibility: a.instancePrivacy(ctx),
 		}, message.From.ID)
 		if err != nil {
 			a.sendError(message.Chat.ID, err)
@@ -475,6 +615,9 @@ func (a *App) handleAdminCommand(ctx context.Context, message *tgbotapi.Message,
 	case "setrewards":
 		a.setRewards(ctx, message, args)
 		return true
+	case "limitedreward":
+		a.setLimitedReward(ctx, message, args)
+		return true
 	case "rewards":
 		a.listRewards(ctx, message.Chat.ID)
 		return true
@@ -550,6 +693,9 @@ func (a *App) handleAdminCommand(ctx context.Context, message *tgbotapi.Message,
 		}
 		if err == nil {
 			err = a.store.AddInstanceAdmin(ctx, a.botInstanceID, userID, permissions)
+			if err == nil {
+				_ = a.syncCommandMenu(ctx, userID)
+			}
 		}
 		a.respondAdminResult(message.Chat.ID, "Admin added.", err)
 		return true
@@ -557,6 +703,9 @@ func (a *App) handleAdminCommand(ctx context.Context, message *tgbotapi.Message,
 		userID, err := strconv.ParseInt(args, 10, 64)
 		if err == nil {
 			err = a.store.RemoveInstanceAdmin(ctx, a.botInstanceID, userID)
+			if err == nil {
+				_ = a.syncCommandMenu(ctx, userID)
+			}
 		}
 		a.respondAdminResult(message.Chat.ID, "Admin removed.", err)
 		return true
@@ -569,11 +718,22 @@ func (a *App) handleAdminCommand(ctx context.Context, message *tgbotapi.Message,
 		return true
 	case "broadcast":
 		if args == "" {
-			a.sendHTML(message.Chat.ID, "Usage: <code>/broadcast message</code>", nil)
+			a.handleBroadcastCallback(ctx, &tgbotapi.CallbackQuery{From: message.From, Message: message, Data: "admin:broadcast"})
 			return true
 		}
-		go a.broadcast(ctx, message.Chat.ID, args)
-		a.sendHTML(message.Chat.ID, "📢 Broadcast queued.", nil)
+		if err := a.store.SetTelegramFlow(ctx, a.botInstanceID, message.From.ID, store.TelegramFlow{Kind: "broadcast", Step: "content", Data: map[string]string{"nonce": broadcastKey()}}); err != nil {
+			a.sendError(message.Chat.ID, err)
+			return true
+		}
+		body, entities, err := commandContent(message.Text, originalEntities(ctx, message, false))
+		if err != nil {
+			a.sendHTML(message.Chat.ID, html.EscapeString(err.Error()), flowCancelMenu("menu:admin"))
+			return true
+		}
+		draft := *message
+		draft.Text, draft.Entities = body, nil
+		ctx = context.WithValue(ctx, entityContextKey{}, incomingUpdate{Entities: entities})
+		a.handleBroadcastMessage(ctx, &draft)
 		return true
 	case "settheme":
 		themeID, err := strconv.Atoi(args)
@@ -628,62 +788,38 @@ func (a *App) handleAdminCommand(ctx context.Context, message *tgbotapi.Message,
 }
 
 func (a *App) handleDocument(ctx context.Context, message *tgbotapi.Message, admin bool) {
-	if !admin || !strings.HasPrefix(strings.TrimSpace(message.Caption), "/addnumbers") {
-		a.sendHTML(message.Chat.ID, "Only admins can import number files.", nil)
+	if !admin {
+		a.sendHTML(message.Chat.ID, "🔒 Only authorized admins can import number files.", userBackMenu())
 		return
 	}
 	allowed, err := a.store.HasAdminPermission(ctx, a.botInstanceID, message.From.ID, "manage_settings")
 	if err != nil || !allowed {
-		a.sendHTML(message.Chat.ID, "🚫 You do not have permission to import number files.", nil)
+		a.sendHTML(message.Chat.ID, "🔒 Inventory permission is required to import number files.", userBackMenu())
 		return
 	}
-	args := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(message.Caption), "/addnumbers"))
-	if args == "" {
-		if err := a.store.SetTelegramFlow(ctx, a.botInstanceID, message.From.ID, store.TelegramFlow{
-			Kind: "number_import", Step: "file", Data: map[string]string{}, ExpiresAt: time.Now().Add(interactiveFlowLifetime),
-		}); err != nil {
-			a.sendError(message.Chat.ID, err)
-			return
+	if err = a.clearNavigationFlow(ctx, message.From.ID); err != nil {
+		a.sendError(message.Chat.ID, err)
+		return
+	}
+	data := map[string]string{}
+	caption := strings.TrimSpace(message.Caption)
+	if fields := strings.Fields(caption); len(fields) > 0 && strings.Split(fields[0], "@")[0] == "/addnumbers" {
+		args := strings.TrimSpace(strings.TrimPrefix(caption, fields[0]))
+		if args != "" {
+			parts := splitExact(args, "|", 6)
+			if len(parts) != 6 {
+				a.sendHTML(message.Chat.ID, "Caption format: <code>/addnumbers Service|Country|CC|PricePKR|PriceUSD|PerCycle</code>. You can also upload without a caption.", adminNumbersMenu())
+				return
+			}
+			data = map[string]string{"service": parts[0], "country": parts[1], "country_code": parts[2], "price_pkr": parts[3], "price_usd": parts[4], "per_cycle": parts[5]}
 		}
-		a.handleInteractiveDocument(ctx, message, admin)
-		return
 	}
-	parts := splitExact(args, "|", 6)
-	if len(parts) != 6 {
-		a.sendHTML(message.Chat.ID, "Caption format: <code>/addnumbers Service|Country|CC|PricePKR|PriceUSD|PerCycle</code>", nil)
-		return
-	}
-	pricePKR, err1 := strconv.ParseFloat(parts[3], 64)
-	priceUSD, err2 := strconv.ParseFloat(parts[4], 64)
-	perCycle, err3 := strconv.Atoi(parts[5])
-	if err1 != nil || err2 != nil || err3 != nil || pricePKR < 0 || priceUSD < 0 || perCycle <= 0 {
-		a.sendHTML(message.Chat.ID, "Invalid price or per-cycle value.", nil)
-		return
-	}
-	fileURL, err := a.bot.GetFileDirectURL(message.Document.FileID)
-	if err != nil {
+	flow := store.TelegramFlow{Kind: "number_import", Step: "file", Data: data, ExpiresAt: time.Now().Add(interactiveFlowLifetime)}
+	if err = a.store.SetTelegramFlow(ctx, a.botInstanceID, message.From.ID, flow); err != nil {
 		a.sendError(message.Chat.ID, err)
 		return
 	}
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		a.sendError(message.Chat.ID, err)
-		return
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
-	if err != nil {
-		a.sendError(message.Chat.ID, err)
-		return
-	}
-	phones := strings.Fields(string(body))
-	added, err := a.store.AddNumbers(ctx, parts[0], parts[1], parts[2], pricePKR, priceUSD, perCycle, phones)
-	if err != nil {
-		a.sendError(message.Chat.ID, err)
-		return
-	}
-	a.sendHTML(message.Chat.ID, fmt.Sprintf("✅ <b>%d</b> unique valid numbers imported.", added), nil)
+	a.handleInteractiveDocument(ctx, message, admin)
 }
 
 func (a *App) listGroups(ctx context.Context, chatID int64) {
@@ -693,7 +829,7 @@ func (a *App) listGroups(ctx context.Context, chatID int64) {
 		return
 	}
 	var text strings.Builder
-	text.WriteString("📨 <b>OTP destinations</b>\n")
+	text.WriteString("📨 <b>OTP destinations</b>\n\nPrivacy controls the message display; enabled copy buttons copy the full OTP.\n")
 	for _, group := range groups {
 		theme := "default"
 		if group.ThemeID != nil {
@@ -749,6 +885,39 @@ func (a *App) setRewards(ctx context.Context, message *tgbotapi.Message, args st
 	a.sendHTML(message.Chat.ID, fmt.Sprintf("✅ Reward schedule <b>#%d</b> activated. Milestones are cumulative and custom schedules replace global rewards.", id), nil)
 }
 
+func (a *App) setLimitedReward(ctx context.Context, message *tgbotapi.Message, args string) {
+	parts := splitExact(args, "|", 3)
+	if len(parts) != 3 {
+		a.sendHTML(message.Chat.ID, "Use Limited Reward in Rewards, or send /limitedreward 1000|5|2 USD. The target is counted OTPs per user per day.", adminRewardsMenu(nil))
+		return
+	}
+	threshold, thresholdErr := strconv.Atoi(strings.TrimSpace(parts[0]))
+	maxUsers, userErr := strconv.Atoi(strings.TrimSpace(parts[1]))
+	amountParts := strings.Fields(parts[2])
+	if thresholdErr != nil || userErr != nil || threshold <= 0 || threshold > 1000000 || maxUsers <= 0 || maxUsers > 1000000 || len(amountParts) != 2 {
+		a.sendHTML(message.Chat.ID, "Enter a positive OTP target, user limit, and reward such as 2 USD.", adminRewardsMenu(nil))
+		return
+	}
+	amount, err := strconv.ParseFloat(amountParts[0], 64)
+	currency := strings.ToUpper(amountParts[1])
+	if err != nil || amount <= 0 || amount > 1000000 || (currency != "USD" && currency != "PKR") {
+		a.sendHTML(message.Chat.ID, "Reward must be a positive amount followed by USD or PKR.", adminRewardsMenu(nil))
+		return
+	}
+	rule := domain.RewardRule{Threshold: threshold, MaxUsers: maxUsers}
+	if currency == "USD" {
+		rule.AmountUSD = amount
+	} else {
+		rule.AmountPKR = amount
+	}
+	id, err := a.store.ReplaceRewardSchedule(ctx, "Limited daily reward", nil, []domain.RewardRule{rule}, message.From.ID)
+	if err != nil {
+		a.sendError(message.Chat.ID, err)
+		return
+	}
+	a.sendHTML(message.Chat.ID, fmt.Sprintf("🎁 Reward schedule <b>#%d</b> active. The first <b>%d</b> users to reach <b>%d counted OTPs in a day</b> receive <b>%.4f %s</b> once. This replaces the previous global reward schedule.", id, maxUsers, threshold, amount, currency), adminRewardsMenu(nil))
+}
+
 func (a *App) listRewards(ctx context.Context, chatID int64) {
 	schedules, err := a.store.ListRewardSchedules(ctx)
 	if err != nil {
@@ -764,7 +933,15 @@ func (a *App) listRewards(ctx context.Context, chatID int64) {
 		}
 		fmt.Fprintf(&text, "\n<b>%s</b>\n", target)
 		for _, rule := range schedule.Rules {
-			fmt.Fprintf(&text, "• %d OTP = %.2f PKR extra\n", rule.Threshold, rule.AmountPKR)
+			if rule.AmountPKR > 0 {
+				fmt.Fprintf(&text, "• %d OTP = %.2f PKR extra", rule.Threshold, rule.AmountPKR)
+			} else {
+				fmt.Fprintf(&text, "• %d OTP = %.4f USD extra", rule.Threshold, rule.AmountUSD)
+			}
+			if rule.MaxUsers > 0 {
+				fmt.Fprintf(&text, " · first %d users once", rule.MaxUsers)
+			}
+			text.WriteString("\n")
 		}
 	}
 	a.sendHTML(chatID, text.String(), adminRewardsMenu(schedules))
@@ -801,73 +978,27 @@ func (a *App) addPanel(ctx context.Context, message *tgbotapi.Message, args stri
 		return
 	}
 	panel := domain.Panel{BotInstanceID: a.botInstanceID, Name: parts[1], Kind: parts[0], Config: config, PollInterval: poll, Enabled: true}
+	panel.Enabled = false
 	adapter, err := panels.NewAdapter(panel)
-	if err == nil {
-		testCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-		err = adapter.Test(testCtx)
-		cancel()
-		adapter.Close()
-	}
-	// Delete the Telegram command because it may contain credentials.
-	_, _ = a.bot.Request(tgbotapi.NewDeleteMessage(message.Chat.ID, message.MessageID))
 	if err != nil {
-		a.sendHTML(message.Chat.ID, "Panel test failed; nothing was saved: "+html.EscapeString(err.Error()), nil)
+		a.sendHTML(message.Chat.ID, panels.SafeError(err), adminPanelMenu(nil))
 		return
 	}
+	_ = adapter.Close()
+	_, _ = a.bot.Request(tgbotapi.NewDeleteMessage(message.Chat.ID, message.MessageID))
 	id, err := a.store.UpsertPanelForInstance(ctx, a.botInstanceID, panel)
 	if err != nil {
 		a.sendError(message.Chat.ID, err)
 		return
 	}
-	a.sendHTML(message.Chat.ID, fmt.Sprintf("✅ Panel <b>#%d %s</b> saved with encrypted configuration.", id, html.EscapeString(panel.Name)), nil)
-}
-
-func (a *App) listPanels(ctx context.Context, chatID int64) {
-	report, err := a.store.PanelHealthReportForInstance(ctx, a.botInstanceID)
-	if err != nil {
-		a.sendError(chatID, err)
+	if err = a.store.SchedulePanelTest(ctx, a.botInstanceID, id, time.Now(), true); err != nil {
+		a.sendError(message.Chat.ID, err)
 		return
 	}
-	var text strings.Builder
-	text.WriteString("📡 <b>Panel health</b>\n")
-	for _, panel := range report {
-		fmt.Fprintf(&text, "\n<b>#%d %s</b> (%s)\nEnabled: %s · Healthy: %s · Failures: %d · OTPs: %d\n",
-			panel.ID, html.EscapeString(panel.Name), panel.Kind, onOff(panel.Enabled), onOff(panel.Healthy), panel.Failures, panel.OTPCount)
-		if panel.LastError != "" {
-			text.WriteString("Error: " + html.EscapeString(panel.LastError) + "\n")
-		}
-	}
-	a.sendHTML(chatID, text.String(), adminPanelMenu(report))
+	a.sendHTML(message.Chat.ID, fmt.Sprintf("✅ Panel <b>#%d %s</b> saved securely. Connection test queued.", id, html.EscapeString(panel.Name)), adminPanelMenu(nil))
 }
 
-func (a *App) broadcast(ctx context.Context, adminChatID int64, text string) {
-	ids, err := a.store.AllUserIDsForInstance(ctx, a.botInstanceID)
-	if err != nil {
-		a.sendError(adminChatID, err)
-		return
-	}
-	sent, failed := 0, 0
-	for _, id := range ids {
-		if ctx.Err() != nil {
-			return
-		}
-		message := tgbotapi.NewMessage(id, premium.AnimateHTML(text))
-		message.ParseMode = tgbotapi.ModeHTML
-		if _, err := a.bot.Send(message); err != nil {
-			failed++
-		} else {
-			sent++
-		}
-		timer := time.NewTimer(50 * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return
-		case <-timer.C:
-		}
-	}
-	a.sendHTML(adminChatID, fmt.Sprintf("📢 Broadcast complete. Sent: <b>%d</b>, failed: <b>%d</b>.", sent, failed), nil)
-}
+func (a *App) listPanels(ctx context.Context, chatID int64) { a.listPanelSources(ctx, chatID) }
 
 func (a *App) missingRequiredChats(ctx context.Context, userID int64) ([]store.RequiredChat, error) {
 	chats, err := a.store.ListRequiredChatsForInstance(ctx, a.botInstanceID)
@@ -896,14 +1027,37 @@ func (a *App) sendJoinRequired(chatID int64, missing []store.RequiredChat) {
 }
 
 func (a *App) handleCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
-	if callback.From == nil || callback.Message == nil {
+	// Rendering state belongs to this update, never to background notifications.
+	request := *a
+	a = &request
+	if callback.From == nil || callback.Message == nil || callback.Message.Chat == nil || (!callback.Message.Chat.IsPrivate() && a.group == nil) {
 		return
 	}
-	_, _ = a.bot.Request(tgbotapi.NewCallback(callback.ID, ""))
-	_ = a.store.EnsureUserForInstance(ctx, a.botInstanceID, callback.From.ID, callback.From.UserName, callback.From.FirstName, callback.From.LastName)
+	if callback.ID != "" {
+		if _, err := a.bot.Request(tgbotapi.NewCallback(callback.ID, "")); err != nil {
+			slog.Warn("callback acknowledgement failed", "bot_instance", a.botInstanceID)
+		}
+	}
+	if a.group != nil && !groupCallbackAllowed(callback.Data) {
+		a.privateHandoff(callback.Message.Chat.ID, privateCommandForRoute(callback.Data))
+		return
+	}
+	slog.Debug("callback received", "bot_instance", a.botInstanceID, "route", strings.Split(callback.Data, ":")[0])
+	if err := a.store.EnsureUserForInstance(ctx, a.botInstanceID, callback.From.ID, callback.From.UserName, callback.From.FirstName, callback.From.LastName); err != nil {
+		a.sendError(callback.Message.Chat.ID, err)
+		return
+	}
+	blocked, blockErr := a.store.UserBlocked(ctx, callback.From.ID)
+	if blockErr != nil || blocked {
+		return
+	}
 	if callback.Data == "check_membership" {
 		missing, err := a.missingRequiredChats(ctx, callback.From.ID)
-		if err != nil || len(missing) > 0 {
+		if err != nil {
+			a.sendError(callback.Message.Chat.ID, err)
+			return
+		}
+		if len(missing) > 0 {
 			a.sendJoinRequired(callback.Message.Chat.ID, missing)
 			return
 		}
@@ -913,19 +1067,54 @@ func (a *App) handleCallback(ctx context.Context, callback *tgbotapi.CallbackQue
 	}
 	chatID := callback.Message.Chat.ID
 	admin, _ := a.store.HasAnyAdminRole(ctx, a.botInstanceID, callback.From.ID)
-	if a.handleStyledCallback(ctx, callback, admin) {
+	if !admin && a.rateLimited(callback.From.ID) {
+		a.sendHTML(chatID, "Please slow down and try again.", userBackMenu())
 		return
 	}
-	if strings.HasPrefix(callback.Data, "admin:") {
-		permission := map[string]string{
-			"admin:panels": "manage_panels", "admin:groups": "manage_groups", "admin:analytics": "view_analytics",
-			"admin:rewards": "manage_rewards", "admin:bots": "manage_bots", "admin:tutorials": "manage_tutorials",
-		}[callback.Data]
-		allowed, _ := a.store.HasAdminPermission(ctx, a.botInstanceID, callback.From.ID, permission)
-		if !admin || permission == "" || !allowed {
-			a.sendHTML(chatID, "🚫 You do not have permission for this admin action.", nil)
+	if !admin {
+		missing, err := a.missingRequiredChats(ctx, callback.From.ID)
+		if err != nil {
+			a.sendError(chatID, err)
 			return
 		}
+		if len(missing) > 0 {
+			a.sendJoinRequired(chatID, missing)
+			return
+		}
+	}
+	if isNavigationCallback(callback.Data) {
+		a.screenChatID, a.screenMessageID = chatID, callback.Message.MessageID
+		if err := a.clearNavigationFlow(ctx, callback.From.ID); err != nil {
+			a.sendError(chatID, err)
+			return
+		}
+	}
+	if a.handleUserBackupCallback(ctx, callback) {
+		return
+	}
+	if a.handleImportJobCallback(ctx, callback) {
+		return
+	}
+	if a.handleActivityCallback(ctx, callback) {
+		return
+	}
+	if a.handleUserToolsCallback(ctx, callback) {
+		return
+	}
+	if a.handlePanelWorkflowCallback(ctx, callback) {
+		return
+	}
+	if a.handleBroadcastCallback(ctx, callback) {
+		return
+	}
+	if a.handleGUISettingsCallback(ctx, callback) {
+		return
+	}
+	if a.handleGuidedCallback(ctx, callback) {
+		return
+	}
+	if a.handleStyledCallback(ctx, callback, admin) {
+		return
 	}
 	switch {
 	case callback.Data == "menu:services":
@@ -935,7 +1124,11 @@ func (a *App) handleCallback(ctx context.Context, callback *tgbotapi.CallbackQue
 	case callback.Data == "menu:stats":
 		a.handleMyStats(ctx, chatID, callback.From.ID)
 	case strings.HasPrefix(callback.Data, "menu:history:"):
-		offset, _ := strconv.Atoi(strings.TrimPrefix(callback.Data, "menu:history:"))
+		offset, err := strconv.Atoi(strings.TrimPrefix(callback.Data, "menu:history:"))
+		if err != nil || offset < 0 {
+			a.sendHTML(chatID, "This history page is invalid.", userBackMenu())
+			return
+		}
 		a.handleHistory(ctx, chatID, callback.From.ID, offset)
 	case callback.Data == "menu:premium":
 		a.handlePremium(ctx, chatID, callback.From.ID)
@@ -953,18 +1146,18 @@ func (a *App) handleCallback(ctx context.Context, callback *tgbotapi.CallbackQue
 		a.handleSchedule(ctx, &tgbotapi.Message{Chat: callback.Message.Chat, From: callback.From}, "")
 	case callback.Data == "menu:api":
 		a.handleAPIKey(ctx, &tgbotapi.Message{Chat: callback.Message.Chat, From: callback.From}, "")
-	case callback.Data == "menu:createbot":
-		a.sendHTML(chatID, "🤖 <b>Create a child bot</b>\n\n1. Create a unique token with @BotFather.\n2. Send <code>/createbot Bot Name|token</code>.\n3. An admin selects Free, Pro, or Enterprise and approves it.\n\nThe credential message is automatically deleted and the token is encrypted.", nil)
 	case callback.Data == "menu:help":
 		a.handleHelp(chatID, admin)
 	case callback.Data == "menu:full":
-		a.sendHTML(chatID, "📖 <b>Full Menu</b>", fullMenu(admin, a.isMain, a.links))
+		_ = a.store.SetMenuMode(ctx, a.botInstanceID, callback.From.ID, false)
+		a.sendHTML(chatID, "📖 <b>Full Menu</b>", fullMenu(admin, a.isMain, a.currentLinks(ctx)))
 	case callback.Data == "menu:compact":
-		a.sendHTML(chatID, "🏠 <b>Main Menu</b>", compactMenu(admin, a.isMain))
+		_ = a.store.SetMenuMode(ctx, a.botInstanceID, callback.From.ID, true)
+		a.sendHTML(chatID, "🏠 <b>Main Menu</b>", a.homeMenu(ctx, callback.From.ID, admin))
+	case callback.Data == "menu:home":
+		a.sendHTML(chatID, "🏠 <b>Main Menu</b>", a.homeMenu(ctx, callback.From.ID, admin))
 	case callback.Data == "menu:admin":
-		if admin {
-			a.sendHTML(chatID, "👮 <b>Admin Dashboard</b>", adminDashboard())
-		}
+		a.sendAdminDashboard(ctx, chatID, callback.From.ID)
 	case strings.HasPrefix(callback.Data, "theme:set:"):
 		themeID, err := strconv.Atoi(strings.TrimPrefix(callback.Data, "theme:set:"))
 		if err == nil {
@@ -978,28 +1171,29 @@ func (a *App) handleCallback(ctx context.Context, callback *tgbotapi.CallbackQue
 	case strings.HasPrefix(callback.Data, "tutorial:"):
 		id, _ := strconv.ParseInt(strings.TrimPrefix(callback.Data, "tutorial:"), 10, 64)
 		a.sendTutorial(ctx, chatID, id)
-	case callback.Data == "admin:panels" && admin:
-		a.listPanels(ctx, chatID)
-	case callback.Data == "admin:groups" && admin:
-		a.listGroups(ctx, chatID)
-	case callback.Data == "admin:analytics" && admin:
-		a.handleAnalyticsAdmin(ctx, chatID)
-	case callback.Data == "admin:rewards" && admin:
-		a.listRewards(ctx, chatID)
-	case callback.Data == "admin:bots" && admin:
-		a.adminListBots(ctx, chatID)
-	case callback.Data == "admin:tutorials" && admin:
-		a.handleTutorials(ctx, chatID)
+	default:
+		a.sendHTML(chatID, "This button is no longer available. Open the Main Menu to continue.", userBackMenu())
 	}
 }
 
 func (a *App) sendHTML(chatID int64, text string, markup any) {
-	message := tgbotapi.NewMessage(chatID, premium.AnimateHTML(text))
-	message.ParseMode = tgbotapi.ModeHTML
-	message.DisableWebPagePreview = true
-	message.ReplyMarkup = markup
-	if _, err := a.bot.Send(message); err != nil {
-		slog.Warn("Telegram response failed", "chat_id", chatID, "error", err)
+	if markup == nil {
+		markup = userBackMenu()
+	}
+	keyboard, ok := markup.(premium.InlineKeyboard)
+	if !ok {
+		a.sendLegacyHTML(chatID, text, markup)
+		return
+	}
+	if err := a.renderDocument(chatID, interfaceDocument(text, keyboard)); err != nil {
+		slog.Warn("Telegram response failed", "chat_id", chatID, "error", safeTelegramError(err))
+	}
+}
+
+// Theme previews keep the same HTML and layout as delivered OTP messages.
+func (a *App) sendLegacyHTML(chatID int64, text string, markup any) {
+	if err := a.renderScreen(chatID, text, markup); err != nil {
+		slog.Warn("Telegram response failed", "chat_id", chatID, "error", safeTelegramError(err))
 	}
 }
 
@@ -1008,7 +1202,7 @@ func (a *App) sendError(chatID int64, err error) {
 		a.sendHTML(chatID, "Requested item was not found.", nil)
 		return
 	}
-	slog.Error("command failed", "chat_id", chatID, "error", err)
+	slog.Error("command failed", "chat_id", chatID, "error_type", fmt.Sprintf("%T", err), "error_code", store.ImportErrorCode(err))
 	a.sendHTML(chatID, "❌ The action could not be completed safely. Please try again or check the logs.", nil)
 }
 

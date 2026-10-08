@@ -27,6 +27,7 @@ type Config struct {
 	TelegramSendRate     int
 	LogLevel             string
 	ChannelURL           string
+	GroupURL             string
 	NumberBotURL         string
 	DeveloperURL         string
 	SupportURL           string
@@ -57,6 +58,7 @@ func Load() (Config, error) {
 	c.MetricsToken = strings.TrimSpace(os.Getenv("METRICS_TOKEN"))
 	c.LogLevel = env("LOG_LEVEL", "info")
 	c.ChannelURL = strings.TrimSpace(os.Getenv("CHANNEL_URL"))
+	c.GroupURL = strings.TrimSpace(os.Getenv("GROUP_URL"))
 	c.NumberBotURL = strings.TrimSpace(os.Getenv("NUMBER_BOT_URL"))
 	c.DeveloperURL = strings.TrimSpace(os.Getenv("DEVELOPER_URL"))
 	c.SupportURL = strings.TrimSpace(os.Getenv("SUPPORT_URL"))

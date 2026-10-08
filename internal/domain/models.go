@@ -3,8 +3,16 @@ package domain
 import "time"
 
 type OTPEvent struct {
+	SharedFromEventID    string
 	ID                   string
 	DedupKey             string
+	LegacyDedupKey       string
+	ProviderRecordID     string
+	Sender               string
+	DeliveryStatus       string
+	ProviderRange        string
+	ProviderProfit       string
+	ProviderCurrency     string
 	BotInstanceID        int64
 	PanelID              int64
 	PanelName            string
@@ -28,6 +36,7 @@ type AcceptedOTP struct {
 	BaseCreditPKR    float64
 	BaseCreditUSD    float64
 	RewardCreditPKR  float64
+	RewardCreditUSD  float64
 	NewBalancePKR    float64
 	NewBalanceUSD    float64
 	TriggeredRewards []RewardAward
@@ -36,6 +45,7 @@ type AcceptedOTP struct {
 type RewardAward struct {
 	Threshold int
 	AmountPKR float64
+	AmountUSD float64
 }
 
 type Number struct {
@@ -90,6 +100,8 @@ type DeliveryJob struct {
 type RewardRule struct {
 	Threshold int
 	AmountPKR float64
+	AmountUSD float64
+	MaxUsers  int
 }
 
 type RewardSchedule struct {
@@ -121,6 +133,7 @@ type IngestJob struct {
 }
 
 type BotInstance struct {
+	ShareMainOTPs       bool
 	ID                  int64
 	ParentID            *int64
 	OwnerUserID         *int64
@@ -144,6 +157,7 @@ type UserPreference struct {
 	Language      string
 	CompactMenu   bool
 	Timezone      string
+	DisplayFormat string
 }
 
 type OTPHistoryItem struct {

@@ -39,8 +39,8 @@ var countryEmojiIDs = map[string]string{
 	"IE": "5224257017509588818", "RO": "5222273794885826118",
 }
 
-const defaultCountryEmojiID = "5222250679371839695"
-const defaultAppEmojiID = "5373026167722876724"
+const defaultCountryEmojiID = "5447410659077661506"
+const defaultAppEmojiID = "5407025283456835913"
 
 var appEmojiIDs = map[string]string{
 	"whatsapp":  "5334998226636390258",
@@ -78,13 +78,25 @@ func CountryEmojiID(code string) string {
 }
 
 func AppEmojiID(service string) string {
-	service = strings.ToLower(strings.TrimSpace(service))
-	for key, id := range appEmojiIDs {
-		if strings.Contains(service, key) {
-			return id
-		}
+	if id := appEmojiIDs[AppKey(service)]; id != "" {
+		return id
 	}
 	return defaultAppEmojiID
+}
+
+// A stable, word-boundary match prevents random map iteration and accidental
+// matches such as "nottelegram" being branded as Telegram.
+func AppKey(service string) string {
+	value := strings.ToLower(strings.TrimSpace(service))
+	if value == "x" || value == "twitter / x" || value == "twitter/x" {
+		return "twitter"
+	}
+	for _, key := range []string{"whatsapp", "telegram", "instagram", "facebook", "google", "gmail", "twitter", "x.com", "tiktok", "snapchat", "binance"} {
+		if value == key || strings.HasPrefix(value, key+" ") || strings.HasPrefix(value, key+"-") {
+			return key
+		}
+	}
+	return value
 }
 
 func CustomEmoji(id, fallback string) string {
@@ -95,6 +107,9 @@ func CustomEmoji(id, fallback string) string {
 }
 
 func CountryFlag(code, fallback string) string {
+	if CountryEmojiID(code) == defaultCountryEmojiID {
+		fallback = "🌐"
+	}
 	return CustomEmoji(CountryEmojiID(code), fallback)
 }
 

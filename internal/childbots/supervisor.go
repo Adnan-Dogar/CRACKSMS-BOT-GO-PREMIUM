@@ -2,8 +2,10 @@ package childbots
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
 	"time"
 
@@ -11,25 +13,28 @@ import (
 	"github.com/adnan-dogar/cracksms-vnext/internal/domain"
 	"github.com/adnan-dogar/cracksms-vnext/internal/store"
 	telegramapp "github.com/adnan-dogar/cracksms-vnext/internal/telegram"
+	"github.com/adnan-dogar/cracksms-vnext/internal/tgtransport"
 	"github.com/adnan-dogar/cracksms-vnext/internal/themes"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 type Supervisor struct {
-	store        *store.Store
-	registry     *botregistry.Registry
-	refresh      time.Duration
-	holdDuration time.Duration
-	location     *time.Location
-	links        themes.Links
-	mu           sync.Mutex
-	workers      map[int64]context.CancelFunc
+	store         *store.Store
+	registry      *botregistry.Registry
+	refresh       time.Duration
+	holdDuration  time.Duration
+	reuseCooldown time.Duration
+	location      *time.Location
+	links         themes.Links
+	mu            sync.Mutex
+	workers       map[int64]context.CancelFunc
 }
 
 func New(repo *store.Store, registry *botregistry.Registry, refresh, holdDuration time.Duration, location *time.Location, links themes.Links) *Supervisor {
 	return &Supervisor{store: repo, registry: registry, refresh: refresh, holdDuration: holdDuration,
 		location: location, links: links, workers: map[int64]context.CancelFunc{}}
 }
+func (s *Supervisor) SetReuseCooldown(d time.Duration) *Supervisor { s.reuseCooldown = d; return s }
 
 func (s *Supervisor) Run(ctx context.Context) {
 	s.reconcile(ctx)
@@ -78,14 +83,15 @@ func (s *Supervisor) reconcile(ctx context.Context) {
 func (s *Supervisor) start(parent context.Context, instance domain.BotInstance) {
 	token, err := s.store.ChildBotToken(parent, instance.ID)
 	if err != nil {
-		_ = s.store.UpdateBotRuntime(parent, instance.ID, "error", "", err)
+		_ = s.store.UpdateBotRuntime(parent, instance.ID, "error", "", safeRuntimeError(err))
 		return
 	}
-	bot, err := tgbotapi.NewBotAPI(token)
+	bot, err := tgbotapi.NewBotAPIWithClient(token, tgbotapi.APIEndpoint, &http.Client{Timeout: 40 * time.Second})
 	if err != nil {
-		_ = s.store.UpdateBotRuntime(parent, instance.ID, "error", "", fmt.Errorf("Telegram authentication: %w", err))
+		_ = s.store.UpdateBotRuntime(parent, instance.ID, "error", "", safeRuntimeError(err))
 		return
 	}
+	bot.Client = tgtransport.New(bot.Client, 25)
 	_, _ = bot.Request(tgbotapi.DeleteWebhookConfig{DropPendingUpdates: false})
 	ctx, cancel := context.WithCancel(parent)
 	s.mu.Lock()
@@ -102,8 +108,10 @@ func (s *Supervisor) start(parent context.Context, instance domain.BotInstance) 
 	go func() {
 		app := telegramapp.NewForInstance(bot, s.store, instance.ID, false, s.holdDuration, s.location)
 		app.SetLinks(s.links)
+		if s.reuseCooldown > 0 {
+			app.SetReuseCooldown(s.reuseCooldown)
+		}
 		runErr := app.Run(ctx)
-		bot.StopReceivingUpdates()
 		s.registry.Unregister(instance.ID)
 		s.mu.Lock()
 		delete(s.workers, instance.ID)
@@ -113,9 +121,9 @@ func (s *Supervisor) start(parent context.Context, instance domain.BotInstance) 
 			if runErr != nil {
 				status = "error"
 			}
-			_ = s.store.UpdateBotRuntime(context.Background(), instance.ID, status, bot.Self.UserName, runErr)
+			_ = s.store.UpdateBotRuntime(context.Background(), instance.ID, status, bot.Self.UserName, safeRuntimeError(runErr))
 		}
-		slog.Info("child bot stopped", "instance_id", instance.ID, "error", runErr)
+		slog.Info("child bot stopped", "instance_id", instance.ID, "error_type", fmt.Sprintf("%T", runErr))
 	}()
 }
 
@@ -127,4 +135,14 @@ func (s *Supervisor) stopAll() {
 		s.registry.Unregister(id)
 		delete(s.workers, id)
 	}
+}
+
+func safeRuntimeError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if api, ok := tgtransport.APIError(err); ok {
+		return fmt.Errorf("Telegram rejected this connection (HTTP %d); check the token and retry", api.Code)
+	}
+	return errors.New("Telegram connection unavailable; check the connection and retry")
 }

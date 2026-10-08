@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
@@ -9,12 +10,10 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	countryinfo "github.com/adnan-dogar/cracksms-vnext/internal/country"
 	"github.com/adnan-dogar/cracksms-vnext/internal/domain"
 	"github.com/adnan-dogar/cracksms-vnext/internal/panels"
 	"github.com/adnan-dogar/cracksms-vnext/internal/premium"
@@ -136,6 +135,15 @@ func (a *App) confirmWithdrawal(ctx context.Context, callback *tgbotapi.Callback
 	if withdrawalCurrency(account.Method) == "USDT" {
 		amountPKR, amountUSD = 0, amount
 	}
+	claimed, claimErr := a.store.ClaimTelegramFlow(ctx, a.botInstanceID, userID, flow)
+	if claimErr != nil {
+		a.sendError(chatID, claimErr)
+		return
+	}
+	if !claimed {
+		a.sendHTML(chatID, "This request has already been handled. Check your balance and history.", profileMenu())
+		return
+	}
 	id, err := a.store.CreateWithdrawalForAccount(ctx, a.botInstanceID, userID, accountID, amountPKR, amountUSD)
 	if err != nil {
 		a.sendError(chatID, err)
@@ -208,32 +216,22 @@ func (a *App) handleAdminInteractiveCallback(ctx context.Context, callback *tgbo
 }
 
 func (a *App) startNumberImport(ctx context.Context, chatID, userID int64) {
-	err := a.store.SetTelegramFlow(ctx, a.botInstanceID, userID, store.TelegramFlow{
-		Kind: "number_import", Step: "file", Data: map[string]string{}, ExpiresAt: time.Now().Add(interactiveFlowLifetime),
-	})
-	if err != nil {
-		a.sendError(chatID, err)
-		return
-	}
-	a.sendHTML(chatID, "📤 <b>Upload Numbers — Step 1</b>\n\nSend a UTF-8 <code>.txt</code> or <code>.csv</code> file containing one number per line. No long caption is required.", flowCancelMenu("admin:numbers"))
+	flow := store.TelegramFlow{Kind: "number_import", Step: "file", Data: map[string]string{"nonce": broadcastKey()}, ExpiresAt: time.Now().Add(interactiveFlowLifetime)}
+	a.importScreen(ctx, chatID, userID, flow, "📤 <b>Upload Numbers — Step 1</b>\n\nSend a UTF-8 <code>.txt</code> or <code>.csv</code> file containing one number per line, or a CSV with a phone column. No long caption is required.", flowCancelMenu("admin:numbers"))
 }
 
 func (a *App) handleInteractiveDocument(ctx context.Context, message *tgbotapi.Message, admin bool) bool {
 	flow, err := a.store.TelegramFlow(ctx, a.botInstanceID, message.From.ID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false
-	}
 	if err != nil || flow.Kind != "number_import" || flow.Step != "file" {
 		return false
 	}
 	if !admin {
-		_ = a.store.ClearTelegramFlow(ctx, a.botInstanceID, message.From.ID)
-		a.sendHTML(message.Chat.ID, "Only authorized admins can import numbers.", nil)
+		a.sendHTML(message.Chat.ID, "🔒 Only authorized admins can import numbers.", userBackMenu())
 		return true
 	}
 	allowed, err := a.store.HasAdminPermission(ctx, a.botInstanceID, message.From.ID, "manage_settings")
 	if err != nil || !allowed {
-		a.sendHTML(message.Chat.ID, "🚫 You do not have permission to import numbers.", nil)
+		a.sendHTML(message.Chat.ID, "🔒 Inventory permission is required.", userBackMenu())
 		return true
 	}
 	name := strings.ToLower(strings.TrimSpace(message.Document.FileName))
@@ -245,15 +243,7 @@ func (a *App) handleInteractiveDocument(ctx context.Context, message *tgbotapi.M
 		a.sendHTML(message.Chat.ID, "The import file must be 10 MB or smaller.", flowCancelMenu("admin:numbers"))
 		return true
 	}
-	flow.Step = "service"
-	flow.Data["file_id"] = message.Document.FileID
-	flow.Data["file_name"] = message.Document.FileName
-	flow.ExpiresAt = time.Now().Add(interactiveFlowLifetime)
-	if err := a.store.SetTelegramFlow(ctx, a.botInstanceID, message.From.ID, flow); err != nil {
-		a.sendError(message.Chat.ID, err)
-		return true
-	}
-	a.sendHTML(message.Chat.ID, "📱 <b>Upload Numbers — Step 2</b>\n\nChoose the service. Every built-in app button uses its premium custom emoji ID. Select <b>Other App</b> to enter a custom name and custom emoji ID.", uploadServicesMenu())
+	a.captureNumberFile(ctx, message, flow)
 	return true
 }
 
@@ -261,7 +251,52 @@ func (a *App) handleNumberImportCallback(ctx context.Context, callback *tgbotapi
 	chatID, userID := callback.Message.Chat.ID, callback.From.ID
 	flow, err := a.store.TelegramFlow(ctx, a.botInstanceID, userID)
 	if err != nil || flow.Kind != "number_import" {
+		if route, nonce, found := strings.Cut(callback.Data, "~"); found && route == "admin:upload:confirm" {
+			if job, e := a.store.ImportByNonce(ctx, a.botInstanceID, userID, nonce); e == nil && job.State != "draft" {
+				job.MessageID = callback.Message.MessageID
+				_ = a.showImportJob(ctx, chatID, userID, job)
+				return
+			}
+		}
 		a.sendHTML(chatID, "⏳ This upload session expired. Start Upload Numbers again.", adminNumbersMenu())
+		return
+	}
+	if flow.Data["nonce"] != "" {
+		route, nonce, found := strings.Cut(callback.Data, "~")
+		if !found || nonce != flow.Data["nonce"] {
+			a.sendHTML(chatID, "⏳ This selection belongs to an older upload. Open the current import.", adminNumbersMenu())
+			return
+		}
+		expected, _ := strconv.Atoi(flow.Data["screen_id"])
+		if expected != 0 && expected != callback.Message.MessageID {
+			return
+		}
+		copy := *callback
+		copy.Data = route
+		callback = &copy
+	}
+	a.screenChatID = chatID
+	a.screenMessageID = callback.Message.MessageID
+	if callback.Data == "admin:upload:cancel" {
+		_ = a.clearNavigationFlow(ctx, userID)
+		a.sendHTML(chatID, "❌ Number import cancelled. No inventory was changed.", adminNumbersMenu())
+		return
+	}
+	if callback.Data == "admin:upload:apps" && (flow.Step == "custom_service_name" || flow.Step == "custom_service_emoji") {
+		flow.Step = "multi_service"
+		a.showMultiImport(ctx, chatID, userID, flow, "")
+		return
+	}
+	if callback.Data == "admin:upload:other" && flow.Step == "multi_service" {
+		if len(importServices(flow)) >= 20 {
+			a.showMultiImport(ctx, chatID, userID, flow, "Select at most 20 apps. Deselect an app to add another.")
+			return
+		}
+		flow.Step = "custom_service_name"
+		a.importScreen(ctx, chatID, userID, flow, "✏️ <b>Add App</b>\n\nSend the app name (maximum 64 characters).", importAppFormMenu(flow))
+		return
+	}
+	if a.handleMultiImport(ctx, callback, flow) {
 		return
 	}
 	data := callback.Data
@@ -272,7 +307,7 @@ func (a *App) handleNumberImportCallback(ctx context.Context, callback *tgbotapi
 			flow.Step = "custom_service_name"
 			flow.ExpiresAt = time.Now().Add(interactiveFlowLifetime)
 			_ = a.store.SetTelegramFlow(ctx, a.botInstanceID, userID, flow)
-			a.sendHTML(chatID, "✏️ <b>Custom App</b>\n\nSend the app/service name (maximum 64 characters).", flowCancelMenu("admin:numbers"))
+			a.sendHTML(chatID, "✏️ <b>Add App</b>\n\nSend the app/service name (maximum 64 characters).", flowCancelMenu("admin:numbers"))
 			return
 		}
 		index, err := strconv.Atoi(choice)
@@ -294,79 +329,6 @@ func (a *App) handleNumberImportCallback(ctx context.Context, callback *tgbotapi
 	}
 }
 
-func (a *App) promptImportPricing(ctx context.Context, chatID, userID int64, flow store.TelegramFlow) {
-	flow.Step = "pricing"
-	flow.ExpiresAt = time.Now().Add(interactiveFlowLifetime)
-	if err := a.store.SetTelegramFlow(ctx, a.botInstanceID, userID, flow); err != nil {
-		a.sendError(chatID, err)
-		return
-	}
-	a.sendHTML(chatID, fmt.Sprintf("💰 <b>%s Import Pricing</b>\n\nSend <code>PricePKR|PriceUSD|NumbersPerCycle</code>, for example <code>1|0|3</code>. Countries and premium flags are detected automatically from each phone number. You may also use the defaults.",
-		html.EscapeString(flow.Data["service"])), uploadPricingMenu())
-}
-
-func (a *App) confirmNumberImport(ctx context.Context, chatID, userID int64, flow store.TelegramFlow) {
-	flow.Step = "confirm"
-	flow.ExpiresAt = time.Now().Add(interactiveFlowLifetime)
-	if err := a.store.SetTelegramFlow(ctx, a.botInstanceID, userID, flow); err != nil {
-		a.sendError(chatID, err)
-		return
-	}
-	a.sendHTML(chatID, fmt.Sprintf("📋 <b>Confirm Number Import</b>\n\nFile: <code>%s</code>\nService: %s <b>%s</b>\nPrice: <b>%s PKR / %s USD</b>\nNumbers per request: <b>%s</b>\nCountry: <b>auto-detect per number</b>",
-		html.EscapeString(flow.Data["file_name"]), premium.CustomEmoji(flow.Data["emoji_id"], "📱"), html.EscapeString(flow.Data["service"]),
-		html.EscapeString(flow.Data["price_pkr"]), html.EscapeString(flow.Data["price_usd"]), html.EscapeString(flow.Data["per_cycle"])), uploadConfirmMenu())
-}
-
-func (a *App) finishNumberImport(ctx context.Context, chatID, userID int64, flow store.TelegramFlow) {
-	body, err := a.downloadTelegramFile(ctx, flow.Data["file_id"])
-	if err != nil {
-		a.sendError(chatID, err)
-		return
-	}
-	pricePKR, err1 := strconv.ParseFloat(flow.Data["price_pkr"], 64)
-	priceUSD, err2 := strconv.ParseFloat(flow.Data["price_usd"], 64)
-	perCycle, err3 := strconv.Atoi(flow.Data["per_cycle"])
-	if err1 != nil || err2 != nil || err3 != nil {
-		a.sendHTML(chatID, "The stored import pricing is invalid. Start again.", adminNumbersMenu())
-		return
-	}
-	if err := a.store.UpsertServiceProfile(ctx, a.botInstanceID, userID, flow.Data["service"], flow.Data["emoji_id"]); err != nil {
-		a.sendError(chatID, err)
-		return
-	}
-	groups := map[countryinfo.Info][]string{}
-	for _, phone := range strings.Fields(string(body)) {
-		info := countryinfo.Detect(phone)
-		if info.Code == "" {
-			info = countryinfo.Info{Code: "UN", Name: "Unknown"}
-		}
-		groups[info] = append(groups[info], phone)
-	}
-	if len(groups) == 0 {
-		a.sendHTML(chatID, "No phone numbers were found in that file.", flowCancelMenu("admin:numbers"))
-		return
-	}
-	infos := make([]countryinfo.Info, 0, len(groups))
-	for info := range groups {
-		infos = append(infos, info)
-	}
-	sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
-	added := 0
-	var lines strings.Builder
-	for _, info := range infos {
-		count, err := a.store.AddNumbers(ctx, flow.Data["service"], info.Name, info.Code, pricePKR, priceUSD, perCycle, groups[info])
-		if err != nil {
-			a.sendError(chatID, err)
-			return
-		}
-		added += count
-		fmt.Fprintf(&lines, "\n%s %s: <b>%d</b>", premium.CountryFlag(info.Code, countryinfo.Flag(info.Code)), html.EscapeString(info.Name), count)
-	}
-	_ = a.store.ClearTelegramFlow(ctx, a.botInstanceID, userID)
-	a.sendHTML(chatID, fmt.Sprintf("✅ <b>%d unique valid numbers imported</b>\n\nService: %s <b>%s</b>%s",
-		added, premium.CustomEmoji(flow.Data["emoji_id"], "📱"), html.EscapeString(flow.Data["service"]), lines.String()), adminNumbersMenu())
-}
-
 func (a *App) downloadTelegramFile(ctx context.Context, fileID string) ([]byte, error) {
 	fileURL, err := a.bot.GetFileDirectURL(fileID)
 	if err != nil {
@@ -376,7 +338,10 @@ func (a *App) downloadTelegramFile(ctx context.Context, fileID string) ([]byte, 
 	if err != nil {
 		return nil, err
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := a.fileClient
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -431,7 +396,7 @@ func (a *App) handlePanelKindCallback(ctx context.Context, callback *tgbotapi.Ca
 	if kind == "login" {
 		prompt = "Send the panel base URL, for example <code>https://panel.example</code>."
 	} else if kind == "websocket" {
-		prompt = "Send the IVAS WebSocket URI beginning with <code>wss://</code> or <code>ws://</code>."
+		prompt = "Send the plain WebSocket URI beginning with <code>wss://</code> or <code>ws://</code>."
 	}
 	a.sendHTML(chatID, "🔗 <b>Add Panel — Connection</b>\n\n"+prompt, flowCancelMenu("admin:panels"))
 }
@@ -442,7 +407,7 @@ func (a *App) testPanelNow(ctx context.Context, chatID, panelID int64) {
 		a.sendError(chatID, err)
 		return
 	}
-	adapter, err := panels.NewAdapter(panel)
+	adapter, err := panels.NewAdapterWithGate(panel, a.store)
 	if err == nil {
 		testCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		err = adapter.Test(testCtx)
@@ -451,7 +416,11 @@ func (a *App) testPanelNow(ctx context.Context, chatID, panelID int64) {
 	}
 	_ = a.store.UpdatePanelHealth(ctx, panel.ID, panel.LastCursor, err)
 	if err != nil {
-		a.sendHTML(chatID, "❌ <b>Panel test failed</b>\n\n"+html.EscapeString(err.Error()), panelActionsMenu(store.PanelHealth{ID: panel.ID, Name: panel.Name, Kind: panel.Kind, Enabled: panel.Enabled}))
+		var provider *panels.ProviderError
+		if errors.As(err, &provider) && provider.Status == 429 && provider.RetryAt.After(time.Now()) {
+			_ = a.store.SchedulePanelTest(ctx, a.botInstanceID, panel.ID, provider.RetryAt, false)
+		}
+		a.sendHTML(chatID, "❌ <b>Panel test pending / failed</b>\n\n"+html.EscapeString(panels.SafeError(err)), panelActionsMenu(store.PanelHealth{ID: panel.ID, Name: panel.Name, Kind: panel.Kind, Enabled: panel.Enabled}))
 		return
 	}
 	a.sendHTML(chatID, "✅ <b>Panel connection successful</b>", panelActionsMenu(store.PanelHealth{ID: panel.ID, Name: panel.Name, Kind: panel.Kind, Enabled: panel.Enabled, Healthy: true}))
@@ -468,14 +437,34 @@ func (a *App) handleFlowText(ctx context.Context, message *tgbotapi.Message, adm
 	}
 	text := strings.TrimSpace(message.Text)
 	if strings.EqualFold(text, "/cancel") {
-		_ = a.store.ClearTelegramFlow(ctx, a.botInstanceID, message.From.ID)
+		_ = a.clearNavigationFlow(ctx, message.From.ID)
 		a.sendHTML(message.Chat.ID, "❌ Interactive action cancelled.", compactMenu(admin, a.isMain))
 		return true
 	}
-	if message.IsCommand() && text != "/default" && text != "/skip" {
+	if message.IsCommand() && text != "/default" && text != "/skip" && !(flow.Kind == "number_import" && flow.Step == "import_search" && text == "/all") {
 		return false
 	}
 	switch flow.Kind {
+	case "provider_mapping", "provider_import", "provider_range", "provider_numbers":
+		return a.handleProviderText(ctx, message, flow)
+	case "ui_setting":
+		return a.handleSettingText(ctx, message, flow)
+	case "panel_source":
+		allowed, _ := a.store.HasAdminPermission(ctx, a.botInstanceID, message.From.ID, "manage_panels")
+		if !allowed {
+			a.sendHTML(message.Chat.ID, "You no longer have panel permission.", userBackMenu())
+			return true
+		}
+		return a.handleSourceText(ctx, message, flow)
+	case "panel_account":
+		allowed, _ := a.store.HasAdminPermission(ctx, a.botInstanceID, message.From.ID, "manage_panels")
+		if !allowed {
+			a.sendHTML(message.Chat.ID, "You no longer have panel permission.", userBackMenu())
+			return true
+		}
+		return a.handleAccountText(ctx, message, flow)
+	case "guided":
+		return a.acceptGuidedInput(ctx, message, flow, text)
 	case "withdrawal_account":
 		return a.handleWithdrawalAccountText(ctx, message, flow)
 	case "withdrawal":
@@ -563,17 +552,37 @@ func (a *App) handleWithdrawalAmountText(ctx context.Context, message *tgbotapi.
 
 func (a *App) handleNumberImportText(ctx context.Context, message *tgbotapi.Message, flow store.TelegramFlow) bool {
 	switch flow.Step {
+	case "import_search":
+		query := strings.TrimSpace(message.Text)
+		if query == "/all" {
+			query = ""
+		}
+		if len(query) > 64 {
+			a.sendHTML(message.Chat.ID, "Search must be 64 characters or fewer.", flowCancelMenu("admin:numbers"))
+			return true
+		}
+		flow.Data["search_query"] = query
+		flow.Data["page"] = "0"
+		flow.Step = "multi_service"
+		a.showMultiImport(ctx, message.Chat.ID, message.From.ID, flow, "")
+		return true
 	case "custom_service_name":
 		name := strings.TrimSpace(message.Text)
 		if name == "" || len(name) > 64 {
 			a.sendHTML(message.Chat.ID, "App name must be 1–64 characters.", flowCancelMenu("admin:numbers"))
 			return true
 		}
+		choices, _ := a.importChoices(ctx, store.TelegramFlow{Data: map[string]string{"custom_apps": flow.Data["custom_apps"]}})
+		for _, existing := range choices {
+			if strings.EqualFold(name, existing) {
+				flow.Step = "multi_service"
+				a.showMultiImport(ctx, message.Chat.ID, message.From.ID, flow, "That app already exists. Select it from the list.")
+				return true
+			}
+		}
 		flow.Data["service"] = name
 		flow.Step = "custom_service_emoji"
-		flow.ExpiresAt = time.Now().Add(interactiveFlowLifetime)
-		_ = a.store.SetTelegramFlow(ctx, a.botInstanceID, message.From.ID, flow)
-		a.sendHTML(message.Chat.ID, "✨ <b>Custom App Emoji</b>\n\nSend the numeric Telegram custom emoji ID. It will be used in service buttons and OTP messages.", flowCancelMenu("admin:numbers"))
+		a.importScreen(ctx, message.Chat.ID, message.From.ID, flow, "✨ <b>Custom App Emoji</b>\n\nSend the numeric Telegram custom emoji ID. It will be used in service buttons and OTP messages.", importAppFormMenu(flow))
 		return true
 	case "custom_service_emoji":
 		emojiID := strings.TrimSpace(message.Text)
@@ -582,6 +591,24 @@ func (a *App) handleNumberImportText(ctx context.Context, message *tgbotapi.Mess
 			return true
 		}
 		flow.Data["emoji_id"] = emojiID
+		apps := importCustomApps(flow)
+		apps[flow.Data["service"]] = emojiID
+		raw, _ := json.Marshal(apps)
+		flow.Data["custom_apps"] = string(raw)
+		if _, ok := flow.Data["services"]; ok {
+			services := importServices(flow)
+			if len(services) >= 20 {
+				a.sendHTML(message.Chat.ID, "Select at most 20 apps.", adminNumbersMenu())
+				return true
+			}
+			services = append(services, flow.Data["service"])
+			flow.Data["services"] = importServiceJSON(services)
+			flow.Step = "multi_service"
+			flow.Data["search_query"] = ""
+			flow.Data["page"] = "0"
+			a.showMultiImport(ctx, message.Chat.ID, message.From.ID, flow, "App added and selected. Add more apps or choose Continue.")
+			return true
+		}
 		a.promptImportPricing(ctx, message.Chat.ID, message.From.ID, flow)
 		return true
 	case "pricing":
@@ -705,24 +732,18 @@ func (a *App) finishPanelWizard(ctx context.Context, chatID, userID int64, flow 
 		return
 	}
 	panel := domain.Panel{BotInstanceID: a.botInstanceID, Name: flow.Data["name"], Kind: flow.Data["kind"], Config: config, PollInterval: 2 * time.Second, Enabled: true}
-	adapter, err := panels.NewAdapter(panel)
-	if err == nil {
-		testCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-		err = adapter.Test(testCtx)
-		cancel()
-		_ = adapter.Close()
-	}
+	panel.Enabled = false
 	_ = a.store.ClearTelegramFlow(ctx, a.botInstanceID, userID)
-	if err != nil {
-		a.sendHTML(chatID, "❌ Panel test failed; credentials were not saved.\n\n"+html.EscapeString(err.Error()), adminPanelMenu(nil))
-		return
-	}
 	id, err := a.store.UpsertPanelForInstance(ctx, a.botInstanceID, panel)
 	if err != nil {
 		a.sendError(chatID, err)
 		return
 	}
-	a.sendHTML(chatID, fmt.Sprintf("✅ Panel <b>#%d %s</b> tested and saved with encrypted credentials. The worker will start automatically.", id, html.EscapeString(panel.Name)), adminPanelMenu(nil))
+	if err = a.store.SchedulePanelTest(ctx, a.botInstanceID, id, time.Now(), true); err != nil {
+		a.sendError(chatID, err)
+		return
+	}
+	a.sendHTML(chatID, fmt.Sprintf("✅ Panel <b>#%d %s</b> saved securely. Connection test queued.", id, html.EscapeString(panel.Name)), adminPanelMenu(nil))
 }
 
 func validPanelURL(kind, value string) bool {

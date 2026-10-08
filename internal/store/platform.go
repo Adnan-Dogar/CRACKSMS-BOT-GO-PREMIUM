@@ -160,10 +160,10 @@ func TierAllows(tier, feature string) bool {
 
 func (s *Store) Preference(ctx context.Context, botInstanceID, userID int64) (domain.UserPreference, error) {
 	botInstanceID = instanceID(botInstanceID)
-	pref := domain.UserPreference{BotInstanceID: botInstanceID, UserID: userID, Language: "en", CompactMenu: true, Timezone: "Asia/Karachi"}
-	err := s.pool.QueryRow(ctx, `SELECT theme_id,language,compact_menu,timezone FROM user_preferences
+	pref := domain.UserPreference{BotInstanceID: botInstanceID, UserID: userID, Language: "en", CompactMenu: true, Timezone: "Asia/Karachi", DisplayFormat: "auto"}
+	err := s.pool.QueryRow(ctx, `SELECT theme_id,language,compact_menu,timezone,display_format FROM user_preferences
 		WHERE bot_instance_id=$1 AND user_id=$2`, botInstanceID, userID).
-		Scan(&pref.ThemeID, &pref.Language, &pref.CompactMenu, &pref.Timezone)
+		Scan(&pref.ThemeID, &pref.Language, &pref.CompactMenu, &pref.Timezone, &pref.DisplayFormat)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return pref, nil
 	}
@@ -303,7 +303,7 @@ func (s *Store) UpdateBotRuntime(ctx context.Context, id int64, status, username
 
 func (s *Store) ListBotInstances(ctx context.Context, enabledOnly bool) ([]domain.BotInstance, error) {
 	query := `SELECT id,parent_id,owner_user_id,name,username,tier,status,enabled,is_main,default_theme,
-		default_group_privacy,settings,last_error,created_at FROM bot_instances`
+		default_group_privacy,settings,last_error,created_at,share_main_otps FROM bot_instances`
 	if enabledOnly {
 		query += ` WHERE enabled AND NOT is_main AND status IN ('approved','running','error')`
 	}
@@ -319,7 +319,7 @@ func (s *Store) ListBotInstances(ctx context.Context, enabledOnly bool) ([]domai
 		var raw []byte
 		if err := rows.Scan(&item.ID, &item.ParentID, &item.OwnerUserID, &item.Name, &item.Username, &item.Tier,
 			&item.Status, &item.Enabled, &item.IsMain, &item.DefaultTheme, &item.DefaultGroupPrivacy,
-			&raw, &item.LastError, &item.CreatedAt); err != nil {
+			&raw, &item.LastError, &item.CreatedAt, &item.ShareMainOTPs); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(raw, &item.Settings)
@@ -330,7 +330,7 @@ func (s *Store) ListBotInstances(ctx context.Context, enabledOnly bool) ([]domai
 
 func (s *Store) ListBotInstancesForOwner(ctx context.Context, ownerID int64) ([]domain.BotInstance, error) {
 	rows, err := s.pool.Query(ctx, `SELECT id,parent_id,owner_user_id,name,username,tier,status,enabled,is_main,default_theme,
-		default_group_privacy,settings,last_error,created_at FROM bot_instances
+		default_group_privacy,settings,last_error,created_at,share_main_otps FROM bot_instances
 		WHERE owner_user_id=$1 AND NOT is_main ORDER BY id`, ownerID)
 	if err != nil {
 		return nil, err
@@ -342,7 +342,7 @@ func (s *Store) ListBotInstancesForOwner(ctx context.Context, ownerID int64) ([]
 		var raw []byte
 		if err := rows.Scan(&item.ID, &item.ParentID, &item.OwnerUserID, &item.Name, &item.Username, &item.Tier,
 			&item.Status, &item.Enabled, &item.IsMain, &item.DefaultTheme, &item.DefaultGroupPrivacy,
-			&raw, &item.LastError, &item.CreatedAt); err != nil {
+			&raw, &item.LastError, &item.CreatedAt, &item.ShareMainOTPs); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(raw, &item.Settings)
@@ -391,8 +391,8 @@ func (s *Store) OTPHistory(ctx context.Context, botInstanceID, userID int64, lim
 		WHERE ra.user_id=e.assigned_user_id AND ra.local_date=(e.received_at AT TIME ZONE $4)::date AND ra.otp_count=(
 			SELECT otp_count FROM user_daily_progress udp WHERE udp.user_id=e.assigned_user_id
 			AND udp.local_date=(e.received_at AT TIME ZONE $4)::date)),0)
-		FROM otp_events e LEFT JOIN numbers n ON n.normalized_phone=e.normalized_phone
-		LEFT JOIN service_countries sc ON sc.service=n.service AND sc.country=n.country
+		FROM otp_events e
+		LEFT JOIN service_countries sc ON sc.service=e.service AND sc.country=e.country
 		WHERE e.bot_instance_id=$1 AND e.assigned_user_id=$2 ORDER BY e.received_at DESC LIMIT $3 OFFSET $5`,
 		instanceID(botInstanceID), userID, limit, s.location.String(), offset)
 	if err != nil {
@@ -490,7 +490,7 @@ func (s *Store) Audit(ctx context.Context, botInstanceID, actorID int64, action,
 		return err
 	}
 	_, err = s.pool.Exec(ctx, `INSERT INTO audit_log(bot_instance_id,actor_user_id,action,target_type,target_id,metadata)
-		VALUES($1,NULLIF($2,0),$3,$4,$5,$6)`, instanceID(botInstanceID), actorID, action, targetType, targetID, raw)
+		VALUES($1,NULLIF($2::bigint,0),$3,$4,$5,$6)`, instanceID(botInstanceID), actorID, action, targetType, targetID, raw)
 	return err
 }
 

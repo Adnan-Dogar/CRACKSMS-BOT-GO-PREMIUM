@@ -14,10 +14,13 @@ import (
 	"github.com/adnan-dogar/cracksms-vnext/internal/domain"
 	"github.com/adnan-dogar/cracksms-vnext/internal/premium"
 	"github.com/adnan-dogar/cracksms-vnext/internal/store"
+	"github.com/adnan-dogar/cracksms-vnext/internal/tgtransport"
 	"github.com/adnan-dogar/cracksms-vnext/internal/themes"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/jackc/pgx/v5"
 )
+
+var errSharingDisabled = errors.New("main OTP sharing disabled")
 
 type Metrics struct {
 	Sent       atomic.Uint64
@@ -31,6 +34,7 @@ type Service struct {
 	bots         BotProvider
 	limiter      *time.Ticker
 	metrics      *Metrics
+	groupURL     string
 	channelURL   string
 	numberBotURL string
 	developerURL string
@@ -50,16 +54,16 @@ func (p staticBotProvider) Bot(instanceID int64) (*tgbotapi.BotAPI, bool) {
 }
 
 func New(repo *store.Store, bot *tgbotapi.BotAPI, messagesPerSecond int, channelURL, numberBotURL string, metrics *Metrics) *Service {
-	return NewRouted(repo, staticBotProvider{bot: bot}, messagesPerSecond, channelURL, numberBotURL, "", "", metrics)
+	return NewRouted(repo, staticBotProvider{bot: bot}, messagesPerSecond, "", channelURL, numberBotURL, "", "", metrics)
 }
 
-func NewRouted(repo *store.Store, bots BotProvider, messagesPerSecond int, channelURL, numberBotURL, developerURL, supportURL string, metrics *Metrics) *Service {
+func NewRouted(repo *store.Store, bots BotProvider, messagesPerSecond int, groupURL, channelURL, numberBotURL, developerURL, supportURL string, metrics *Metrics) *Service {
 	if messagesPerSecond <= 0 {
 		messagesPerSecond = 25
 	}
 	return &Service{
 		store: repo, bots: bots, limiter: time.NewTicker(time.Second / time.Duration(messagesPerSecond)),
-		metrics: metrics, channelURL: channelURL, numberBotURL: numberBotURL, developerURL: developerURL,
+		metrics: metrics, groupURL: groupURL, channelURL: channelURL, numberBotURL: numberBotURL, developerURL: developerURL,
 		supportURL: supportURL, chatAt: map[int64]time.Time{},
 	}
 }
@@ -102,7 +106,7 @@ func (s *Service) worker(ctx context.Context, workerID int) {
 		case <-s.limiter.C:
 		}
 		s.waitPerChat(ctx, job.TargetID)
-		err = s.send(job)
+		err = s.sendContext(ctx, job)
 		retryAfter, permanent := classifyTelegramError(err)
 		if err == nil {
 			s.metrics.Sent.Add(1)
@@ -117,17 +121,28 @@ func (s *Service) worker(ctx context.Context, workerID int) {
 		if completeErr := s.store.CompleteDeliveryJob(ctx, job, err, retryAfter, permanent); completeErr != nil {
 			slog.Error("complete delivery", "job_id", job.ID, "error", completeErr)
 		}
-		if job.TargetKind == "group" {
+		if job.TargetKind == "group" && !errors.Is(err, errSharingDisabled) {
 			_ = s.store.MarkOTPGroupDeliveryForInstance(ctx, job.BotInstanceID, job.TargetID, err)
 		}
 	}
 }
 
-func (s *Service) send(job domain.DeliveryJob) error {
+func (s *Service) send(job domain.DeliveryJob) error { return s.sendContext(context.Background(), job) }
+func (s *Service) sendContext(ctx context.Context, job domain.DeliveryJob) error {
+	if s.store != nil && job.Event.SharedFromEventID != "" {
+		allowed, err := s.store.SharedDeliveryAllowed(ctx, job.Event.ID)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			return errSharingDisabled
+		}
+	}
 	bot, ok := s.bots.Bot(job.BotInstanceID)
 	if !ok {
 		return fmt.Errorf("bot instance %d is not running", job.BotInstanceID)
 	}
+	bot = tgtransport.PriorityBot(ctx, bot)
 	forUser := job.TargetKind == "user"
 	body := premium.AnimateHTML(themes.Format(job.Event, job.ThemeID, forUser, job.OTPVisibility))
 	message := tgbotapi.NewMessage(job.TargetID, body)
@@ -135,9 +150,11 @@ func (s *Service) send(job domain.DeliveryJob) error {
 	message.DisableWebPagePreview = true
 	if job.ButtonsEnabled {
 		exposeOTP := forUser || job.OTPVisibility == "visible"
-		message.ReplyMarkup = themes.Keyboard(job.Event, job.ThemeID, themes.Links{
-			Channel: s.channelURL, NumberBot: s.numberBotURL, Developer: s.developerURL, Support: s.supportURL,
-		}, exposeOTP)
+		links, e := s.store.EffectiveLinks(ctx, job.BotInstanceID, themes.Links{Group: s.groupURL, Channel: s.channelURL, NumberBot: s.numberBotURL, Developer: s.developerURL, Support: s.supportURL})
+		if e != nil {
+			return e
+		}
+		message.ReplyMarkup = themes.Keyboard(job.Event, job.ThemeID, links, exposeOTP, forUser)
 	}
 	_, err := bot.Send(message)
 	return err
@@ -152,7 +169,7 @@ func OTPKeyboard(code, channelURL, numberBotURL string) premium.InlineKeyboard {
 		return premium.InlineKeyboard{}
 	}
 	rows := [][]premium.InlineButton{{
-		{Text: "Copy OTP", CopyText: &premium.CopyText{Text: code}, Style: "danger", IconCustomEmojiID: premium.ID("otp")},
+		{Text: "Copy OTP", CopyText: &premium.CopyText{Text: code}, Style: "success", IconCustomEmojiID: premium.ID("otp")},
 	}}
 	var links []premium.InlineButton
 	if channelURL != "" {
@@ -198,6 +215,17 @@ var retryAfterPattern = regexp.MustCompile(`(?i)retry after\s+(\d+)`)
 func classifyTelegramError(err error) (time.Duration, bool) {
 	if err == nil {
 		return 0, false
+	}
+	if errors.Is(err, errSharingDisabled) {
+		return 0, true
+	}
+	if api, ok := tgtransport.APIError(err); ok {
+		if api.Code == 429 {
+			return time.Duration(max(1, api.RetryAfter)) * time.Second, false
+		}
+		if api.Code == 403 || api.Code == 400 {
+			return 0, true
+		}
 	}
 	text := strings.ToLower(err.Error())
 	if match := retryAfterPattern.FindStringSubmatch(text); len(match) == 2 {

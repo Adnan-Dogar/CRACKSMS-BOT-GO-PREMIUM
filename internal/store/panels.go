@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"time"
 
 	"github.com/adnan-dogar/cracksms-vnext/internal/domain"
@@ -95,12 +96,31 @@ func (s *Store) UpsertPanelForInstance(ctx context.Context, botInstanceID int64,
 	if err != nil {
 		return 0, err
 	}
+	link := ""
+	for _, key := range []string{"base_url", "url", "sms_url"} {
+		if value, ok := panel.Config[key].(string); ok && value != "" {
+			link = value
+			break
+		}
+	}
+	if parsed, e := url.Parse(link); e == nil {
+		parsed.RawQuery = ""
+		parsed.User = nil
+		link = parsed.String()
+	}
+	var sourceID int64
+	err = s.pool.QueryRow(ctx, `INSERT INTO panel_sources(bot_instance_id,name,kind,url) VALUES($1,$2,$3,$4)
+ ON CONFLICT(bot_instance_id,name) DO UPDATE SET url=CASE WHEN panel_sources.url='' THEN EXCLUDED.url ELSE panel_sources.url END RETURNING id`, botInstanceID, panel.Name, panel.Kind, link).Scan(&sourceID)
+	if err != nil {
+		return 0, err
+	}
 	var id int64
-	err = s.pool.QueryRow(ctx, `INSERT INTO panels(bot_instance_id,name,kind,config,poll_interval,enabled)
-		VALUES($1,$2,$3,$4,$5::interval,$6)
+	err = s.pool.QueryRow(ctx, `INSERT INTO panels(bot_instance_id,name,kind,config,poll_interval,enabled,source_id)
+		VALUES($1,$2,$3,$4,$5::interval,$6,$7)
 		ON CONFLICT(bot_instance_id,name) DO UPDATE SET kind=EXCLUDED.kind,config=EXCLUDED.config,
+		last_cursor=CASE WHEN panels.kind=EXCLUDED.kind THEN panels.last_cursor ELSE '' END,
 		poll_interval=EXCLUDED.poll_interval,enabled=EXCLUDED.enabled,updated_at=now()
-		RETURNING id`, botInstanceID, panel.Name, panel.Kind, envelope, postgresInterval(panel.PollInterval), panel.Enabled).Scan(&id)
+		RETURNING id`, botInstanceID, panel.Name, panel.Kind, envelope, postgresInterval(panel.PollInterval), panel.Enabled, sourceID).Scan(&id)
 	return id, err
 }
 
@@ -141,7 +161,7 @@ func (s *Store) PanelHealthReport(ctx context.Context) ([]PanelHealth, error) {
 }
 
 func (s *Store) PanelHealthReportForInstance(ctx context.Context, botInstanceID int64) ([]PanelHealth, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id,name,kind,enabled,healthy,consecutive_failures,last_success_at,last_error,otp_count
+	rows, err := s.pool.Query(ctx, `SELECT id,CASE WHEN account_label='Default account' THEN name ELSE account_label END,kind,enabled,healthy,consecutive_failures,last_success_at,last_error,otp_count
 		FROM panels WHERE bot_instance_id=$1 ORDER BY id`, instanceID(botInstanceID))
 	if err != nil {
 		return nil, err

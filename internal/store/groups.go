@@ -142,10 +142,10 @@ func (s *Store) ClaimDeliveryJob(ctx context.Context) (domain.DeliveryJob, error
 		  e.id,e.bot_instance_id,COALESCE(e.panel_id,0),e.panel_name,e.phone,e.normalized_phone,e.service,
 		  COALESCE((SELECT sp.custom_emoji_id FROM service_profiles sp
 		    WHERE sp.bot_instance_id=e.bot_instance_id AND sp.service_key=lower(e.service) LIMIT 1),''),
-		  e.country,e.message,e.code,e.provider_timestamp,e.received_at`,
+	  e.country,e.message,e.code,e.provider_timestamp,e.received_at,COALESCE(e.shared_from_event_id::text,'')`,
 	).Scan(&job.ID, &job.BotInstanceID, &job.TargetKind, &job.TargetID, &job.ButtonsEnabled, &job.ThemeID, &job.OTPVisibility, &job.Attempts,
 		&job.Event.ID, &job.Event.BotInstanceID, &job.Event.PanelID, &job.Event.PanelName, &job.Event.Phone, &job.Event.NormalizedPhone,
-		&job.Event.Service, &job.Event.ServiceCustomEmojiID, &job.Event.Country, &job.Event.Message, &job.Event.Code, &providerTimestamp, &job.Event.ReceivedAt)
+		&job.Event.Service, &job.Event.ServiceCustomEmojiID, &job.Event.Country, &job.Event.Message, &job.Event.Code, &providerTimestamp, &job.Event.ReceivedAt, &job.Event.SharedFromEventID)
 	job.Event.ProviderTimestamp = providerTimestamp
 	return job, err
 }

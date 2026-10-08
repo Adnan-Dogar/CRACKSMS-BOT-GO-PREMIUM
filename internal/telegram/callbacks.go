@@ -43,7 +43,7 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 		return true
 	}
 	if data == "flow:cancel" {
-		_ = a.store.ClearTelegramFlow(ctx, a.botInstanceID, userID)
+		_ = a.clearNavigationFlow(ctx, userID)
 		a.sendHTML(chatID, "❌ Interactive action cancelled.", compactMenu(admin, a.isMain))
 		return true
 	}
@@ -54,6 +54,10 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 	}
 	if !strings.HasPrefix(data, "admin:") {
 		return false
+	}
+	if !a.isMain && strings.HasPrefix(data, "admin:bot") {
+		a.sendHTML(chatID, "Child-bot management is available in the main bot.", userBackMenu())
+		return true
 	}
 	permission := adminCallbackPermission(data)
 	if !admin || permission == "" {
@@ -77,12 +81,8 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 		a.sendAdminInventory(ctx, chatID)
 	case data == "admin:numbers:upload":
 		a.startNumberImport(ctx, chatID, userID)
-	case data == "admin:broadcast":
-		a.sendHTML(chatID, "📢 <b>Broadcast</b>\n\nCopy the template, replace the text, and send it. Delivery is rate-limited and reports sent/failed totals.", commandTemplateMenu("Copy broadcast command", "/broadcast Your announcement", "menu:admin"))
 	case data == "admin:users":
 		a.sendAdminUsers(ctx, chatID)
-	case data == "admin:user:tier-help":
-		a.sendHTML(chatID, "💎 <b>Set a user tier</b>\n\nSelect a user from the list or use the command template for an optional expiry date.", commandTemplateMenu("Copy tier command", "/settier 123456789|pro|2026-12-31", "admin:users"))
 	case len(parts) == 4 && parts[1] == "user" && parts[2] == "view":
 		a.sendAdminUser(ctx, chatID, parts[3])
 	case len(parts) == 5 && parts[1] == "user" && parts[2] == "tier":
@@ -133,8 +133,6 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 		}
 	case data == "admin:admins":
 		a.sendAdminList(ctx, chatID)
-	case data == "admin:admin:add":
-		a.sendHTML(chatID, "👤 <b>Add an administrator</b>\n\nUse <code>*</code> for full access or a comma-separated permission list.", commandTemplateMenu("Copy add-admin command", "/addadmin 123456789|manage_panels,manage_groups", "admin:admins"))
 	case len(parts) == 4 && parts[1] == "admin" && parts[2] == "delete":
 		target, ok := parseCallbackInt(parts[3])
 		if !ok || target == userID {
@@ -155,8 +153,6 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 		}
 	case data == "admin:required":
 		a.sendAdminRequired(ctx, chatID)
-	case data == "admin:required:add":
-		a.sendHTML(chatID, "🔒 <b>Add a required chat</b>\n\nThe bot must be able to inspect membership in the target chat.", commandTemplateMenu("Copy required-chat command", "/addrequired -1001234567890|Updates|https://t.me/yourchannel", "admin:required"))
 	case len(parts) == 4 && parts[1] == "required" && parts[2] == "delete":
 		id, ok := parseCallbackInt(parts[3])
 		if ok {
@@ -175,8 +171,6 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 		}
 	case data == "admin:patterns":
 		a.adminListPatterns(ctx, chatID)
-	case data == "admin:pattern:add":
-		a.sendHTML(chatID, "🧩 <b>Add an OTP extraction pattern</b>\n\nThe first RE2 capture group must contain the OTP.", commandTemplateMenu("Copy pattern command", `/patternadd Example|(?i)code[: ]+([0-9]{6})`, "admin:patterns"))
 	case len(parts) == 4 && parts[1] == "pattern" && parts[2] == "delete":
 		id, ok := parseCallbackInt(parts[3])
 		if ok {
@@ -194,7 +188,7 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 			a.adminListPatterns(ctx, chatID)
 		}
 	case data == "admin:settings":
-		a.sendHTML(chatID, "⚙️ <b>Admin Settings</b>\n\nAll controls are instance-scoped, including child bots.", adminSettingsMenu())
+		a.showAdminSettings(ctx, chatID)
 	case data == "admin:themes":
 		active, err := a.store.DefaultTheme(ctx, a.botInstanceID)
 		if err != nil {
@@ -247,8 +241,6 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 		}
 	case data == "admin:groups":
 		a.listGroups(ctx, chatID)
-	case data == "admin:group:add":
-		a.sendHTML(chatID, "➕ <b>Add an OTP group</b>\n\nAdd the bot to the group first. The bot validates access and sends a test message before saving it.", commandTemplateMenu("Copy add-group command", "/addgroup -1001234567890|buttons|Main OTP Group", "admin:groups"))
 	case len(parts) == 4 && parts[1] == "group" && parts[2] == "view":
 		a.sendAdminGroup(ctx, chatID, parts[3])
 	case len(parts) == 5 && parts[1] == "group" && parts[2] == "enable":
@@ -311,10 +303,8 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 		}
 	case data == "admin:rewards":
 		a.listRewards(ctx, chatID)
-	case data == "admin:reward:set":
-		a.sendHTML(chatID, "🎁 <b>Set cumulative daily rewards</b>\n\nA user-specific schedule replaces the global schedule for that user. Progress resets logically at midnight in the configured timezone.", commandTemplateMenu("Copy reward command", "/setrewards global|30=30,100=30,200=50", "admin:rewards"))
 	case strings.HasPrefix(data, "admin:reward:"):
-		a.sendHTML(chatID, "🎁 Use <code>/setrewards</code> to replace this schedule. Use <code>/clearreward user_id</code> to remove a user override.", commandTemplateMenu("Copy reward command", "/setrewards global|30=30,100=30,200=50", "admin:rewards"))
+		a.sendHTML(chatID, "🎁 <b>Manage Reward Schedule</b>", integrationMenu("reward", "clearreward"))
 	case data == "admin:bots":
 		a.adminListBots(ctx, chatID)
 	case len(parts) == 4 && parts[1] == "bot" && parts[2] == "view":
@@ -341,6 +331,16 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 		} else {
 			a.adminListBots(ctx, chatID)
 		}
+	case len(parts) == 5 && parts[1] == "bot" && parts[2] == "otpshare":
+		id, ok := parseCallbackInt(parts[3])
+		if !ok {
+			break
+		}
+		if err := a.store.SetChildOTPSharing(ctx, userID, id, parts[4] == "1"); err != nil {
+			a.sendError(chatID, err)
+		} else {
+			a.sendAdminBot(ctx, chatID, parts[3])
+		}
 	case len(parts) == 4 && parts[1] == "bot" && parts[2] == "reject":
 		id, ok := parseCallbackInt(parts[3])
 		if ok {
@@ -359,8 +359,6 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 		}
 	case data == "admin:tutorials":
 		a.sendAdminTutorials(ctx, chatID)
-	case data == "admin:tutorial:add":
-		a.sendHTML(chatID, "📚 <b>Add a tutorial</b>", commandTemplateMenu("Copy tutorial command", "/tutorialadd Title|Short description|Tutorial body", "admin:tutorials"))
 	case len(parts) == 4 && parts[1] == "tutorial" && parts[2] == "delete":
 		id, ok := parseCallbackInt(parts[3])
 		if ok {
@@ -391,40 +389,37 @@ func (a *App) handleBuyCallback(ctx context.Context, callback *tgbotapi.Callback
 		a.sendError(callback.Message.Chat.ID, err)
 		return
 	}
-	services := store.SortedServices(catalog)
 	parts := strings.Split(callback.Data, ":")
-	if len(parts) == 3 && parts[1] == "s" {
-		index, err := strconv.Atoi(parts[2])
-		if err != nil || index < 0 || index >= len(services) {
-			a.sendHTML(callback.Message.Chat.ID, "Inventory changed; please select a service again.", servicesMenu(catalog))
-			return
+	if len(parts) == 3 && parts[1] == "service" {
+		for _, service := range store.SortedServices(catalog) {
+			if selectionKey(service) == parts[2] {
+				a.sendHTML(callback.Message.Chat.ID, fmt.Sprintf("📱 <b>%s countries</b>\n\nChoose a country below.", html.EscapeString(service)), countriesMenu(service, catalog[service]))
+				return
+			}
 		}
-		service := services[index]
-		a.sendHTML(callback.Message.Chat.ID, fmt.Sprintf("%s <b>%s countries</b>\n\nAvailability is shown on each button.",
-			premium.CustomEmoji(catalogServiceEmojiID(service, catalog[service]), "📱"), html.EscapeString(service)), countriesMenu(index, catalog[service]))
-		return
 	}
-	if len(parts) == 4 && parts[1] == "c" {
-		serviceIndex, err1 := strconv.Atoi(parts[2])
-		countryIndex, err2 := strconv.Atoi(parts[3])
-		if err1 != nil || err2 != nil || serviceIndex < 0 || serviceIndex >= len(services) {
-			a.sendHTML(callback.Message.Chat.ID, "Inventory changed; please select a service again.", servicesMenu(catalog))
-			return
+	if len(parts) == 4 && parts[1] == "country" {
+		for _, service := range store.SortedServices(catalog) {
+			if selectionKey(service) != parts[2] {
+				continue
+			}
+			for _, country := range catalog[service] {
+				if selectionKey(country.Country) == parts[3] {
+					a.handleGetNumber(ctx, &tgbotapi.Message{Chat: callback.Message.Chat, From: callback.From}, service+"|"+country.Country)
+					return
+				}
+			}
 		}
-		service := services[serviceIndex]
-		countries := catalog[service]
-		if countryIndex < 0 || countryIndex >= len(countries) {
-			a.sendHTML(callback.Message.Chat.ID, "Inventory changed; please select a country again.", countriesMenu(serviceIndex, countries))
-			return
-		}
-		message := &tgbotapi.Message{Chat: callback.Message.Chat, From: callback.From}
-		a.handleGetNumber(ctx, message, service+"|"+countries[countryIndex].Country)
 	}
+	// Positional callbacks from older menus cannot safely identify inventory.
+	a.sendHTML(callback.Message.Chat.ID, "Inventory changed or this menu is outdated. Please select a service again.", servicesMenu(catalog))
 }
 
 func adminCallbackPermission(data string) string {
 	switch {
-	case strings.HasPrefix(data, "admin:panel"):
+	case strings.HasPrefix(data, "admin:backups"):
+		return "manage_backups"
+	case strings.HasPrefix(data, "admin:panel"), strings.HasPrefix(data, "admin:source:"):
 		return "manage_panels"
 	case strings.HasPrefix(data, "admin:group"):
 		return "manage_groups"
@@ -446,7 +441,7 @@ func adminCallbackPermission(data string) string {
 		return "broadcast"
 	case data == "admin:analytics":
 		return "view_analytics"
-	case strings.HasPrefix(data, "admin:numbers"), strings.HasPrefix(data, "admin:upload"), data == "admin:inventory", strings.HasPrefix(data, "admin:required"), strings.HasPrefix(data, "admin:setting"), strings.HasPrefix(data, "admin:theme"):
+	case strings.HasPrefix(data, "admin:imports:"), strings.HasPrefix(data, "admin:numbers"), strings.HasPrefix(data, "admin:upload"), data == "admin:inventory", strings.HasPrefix(data, "admin:required"), strings.HasPrefix(data, "admin:setting"), strings.HasPrefix(data, "admin:theme"):
 		return "manage_settings"
 	default:
 		return ""
@@ -536,6 +531,7 @@ func (a *App) sendAdminWithdrawal(ctx context.Context, chatID int64, rawID strin
 }
 
 func (a *App) sendAdminList(ctx context.Context, chatID int64) {
+	_ = a.registerCommands(ctx)
 	items, err := a.store.ListInstanceAdmins(ctx, a.botInstanceID)
 	if err != nil {
 		a.sendError(chatID, err)
@@ -566,11 +562,18 @@ func (a *App) sendAdminPanel(ctx context.Context, chatID int64, rawID string) {
 	}
 	for _, panel := range report {
 		if panel.ID == id {
-			text := fmt.Sprintf("📡 <b>#%d %s</b>\n\nType: <b>%s</b>\nEnabled: <b>%s</b>\nHealthy: <b>%s</b>\nFailures: <b>%d</b>\nOTPs: <b>%d</b>", panel.ID, html.EscapeString(panel.Name), html.EscapeString(panel.Kind), onOff(panel.Enabled), onOff(panel.Healthy), panel.Failures, panel.OTPCount)
+			text := fmt.Sprintf("📡 <b>Account #%d · %s</b>\n\nType: <b>%s</b>\nEnabled: <b>%s</b>\nHealthy: <b>%s</b>\nFailures: <b>%d</b>\nOTPs: <b>%d</b>", panel.ID, html.EscapeString(panel.Name), html.EscapeString(panel.Kind), onOff(panel.Enabled), onOff(panel.Healthy), panel.Failures, panel.OTPCount)
 			if panel.LastError != "" {
 				text += "\nLast error: " + html.EscapeString(panel.LastError)
 			}
-			a.sendHTML(chatID, text, panelActionsMenu(panel))
+			source, e := a.store.AccountSourceID(ctx, a.botInstanceID, panel.ID)
+			if e != nil {
+				a.sendError(chatID, e)
+				return
+			}
+			menu := panelActionsMenu(panel)
+			menu.InlineKeyboard = append([][]premium.InlineButton{{premium.Button("Edit Credentials", fmt.Sprintf("admin:panel:credentials:%d", panel.ID), "primary", "key"), premium.Button("Panel", fmt.Sprintf("admin:source:view:%d", source), "primary", "plug")}}, menu.InlineKeyboard...)
+			a.sendHTML(chatID, text, menu)
 			return
 		}
 	}
@@ -605,6 +608,7 @@ func (a *App) sendAdminGroup(ctx context.Context, chatID int64, rawID string) {
 		theme = fmt.Sprintf("T%d · %s", *group.ThemeID, themes.Get(*group.ThemeID).Name)
 	}
 	text := fmt.Sprintf("📨 <b>%s</b>\n\nChat: <code>%d</code>\nEnabled: <b>%s</b>\nButtons: <b>%s</b>\nPrivacy: <b>%s</b>\nTheme: <b>%s</b>\nHealthy: <b>%s</b>", html.EscapeString(group.Title), group.ChatID, onOff(group.Enabled), onOff(group.ButtonsEnabled), html.EscapeString(group.OTPVisibility), html.EscapeString(theme), onOff(group.Healthy))
+	text += "\nPrivacy controls the message display; enabled copy buttons copy the full OTP."
 	if group.LastError != "" {
 		text += "\nLast error: " + html.EscapeString(group.LastError)
 	}
@@ -650,6 +654,7 @@ func (a *App) sendAdminBot(ctx context.Context, chatID int64, rawID string) {
 			owner = *item.OwnerUserID
 		}
 		text := fmt.Sprintf("🤖 <b>#%d %s</b>\n\nStatus: <b>%s</b>\nTier: <b>%s</b>\nEnabled: <b>%s</b>\nOwner: <code>%d</code>\nUsername: @%s", item.ID, html.EscapeString(item.Name), html.EscapeString(item.Status), html.EscapeString(item.Tier), onOff(item.Enabled), owner, html.EscapeString(item.Username))
+		text += "\nMain OTP sharing: <b>" + onOff(item.ShareMainOTPs) + "</b>\nShared OTPs match active numbers and services assigned in this child only."
 		if item.LastError != "" {
 			text += "\nLast error: " + html.EscapeString(item.LastError)
 		}

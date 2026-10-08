@@ -70,6 +70,38 @@ func Flag(code string) string {
 	return string([]rune{rune(code[0]) - 'A' + 0x1F1E6, rune(code[1]) - 'A' + 0x1F1E6})
 }
 
+// Resolve explicit provider/catalog metadata, never infer a country from an
+// ambiguous telephone prefix when building shared activity statistics.
+func Resolve(value string) Info {
+	value = strings.TrimSpace(value)
+	for _, info := range callingCodes {
+		if info.Code == "US" {
+			info.Name = "United States"
+		}
+		if info.Code == "RU" {
+			info.Name = "Russia"
+		}
+		if strings.EqualFold(value, info.Code) || strings.EqualFold(value, info.Name) {
+			return info
+		}
+	}
+	for _, info := range []Info{{"CA", "Canada"}, {"KZ", "Kazakhstan"}, {"GB", "UK"}, {"US", "USA"}, {"KR", "Korea"}} {
+		if strings.EqualFold(value, info.Code) || strings.EqualFold(value, info.Name) {
+			if info.Code == "GB" {
+				info.Name = "United Kingdom"
+			}
+			if info.Code == "US" {
+				info.Name = "United States"
+			}
+			if info.Code == "KR" {
+				info.Name = "South Korea"
+			}
+			return info
+		}
+	}
+	return Info{}
+}
+
 func ServiceEmoji(service string) string {
 	value := strings.ToLower(service)
 	for keyword, emoji := range map[string]string{

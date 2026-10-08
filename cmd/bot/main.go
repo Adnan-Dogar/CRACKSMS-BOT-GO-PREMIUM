@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/adnan-dogar/cracksms-vnext/internal/botregistry"
+	"github.com/adnan-dogar/cracksms-vnext/internal/broadcast"
 	"github.com/adnan-dogar/cracksms-vnext/internal/childbots"
 	"github.com/adnan-dogar/cracksms-vnext/internal/config"
 	"github.com/adnan-dogar/cracksms-vnext/internal/db"
@@ -22,6 +24,7 @@ import (
 	"github.com/adnan-dogar/cracksms-vnext/internal/secure"
 	"github.com/adnan-dogar/cracksms-vnext/internal/store"
 	telegramapp "github.com/adnan-dogar/cracksms-vnext/internal/telegram"
+	"github.com/adnan-dogar/cracksms-vnext/internal/tgtransport"
 	"github.com/adnan-dogar/cracksms-vnext/internal/themes"
 	webhookservice "github.com/adnan-dogar/cracksms-vnext/internal/webhook"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -60,6 +63,9 @@ func run() error {
 		return err
 	}
 	repo := store.New(pool, cfg.Timezone, cipher)
+	if err := repo.HydratePanelSourceLinks(ctx); err != nil {
+		return err
+	}
 	if err := repo.SeedAdmins(ctx, cfg.AdminIDs); err != nil {
 		return err
 	}
@@ -67,10 +73,11 @@ func run() error {
 		return err
 	}
 
-	bot, err := tgbotapi.NewBotAPI(cfg.BotToken)
+	bot, err := tgbotapi.NewBotAPIWithClient(cfg.BotToken, tgbotapi.APIEndpoint, &http.Client{Timeout: 40 * time.Second})
 	if err != nil {
 		return err
 	}
+	bot.Client = tgtransport.New(bot.Client, cfg.TelegramSendRate)
 	bot.Debug = false
 	if _, err := bot.Request(tgbotapi.DeleteWebhookConfig{DropPendingUpdates: false}); err != nil {
 		slog.Warn("delete webhook", "error", err)
@@ -82,19 +89,20 @@ func run() error {
 	webhookMetrics := &webhookservice.Metrics{}
 	registry := botregistry.New()
 	registry.Register(store.MainBotInstanceID, bot)
-	links := themes.Links{Channel: cfg.ChannelURL, NumberBot: cfg.NumberBotURL, Developer: cfg.DeveloperURL, Support: cfg.SupportURL}
+	go broadcast.Run(ctx, repo, registry)
+	links := themes.Links{Group: cfg.GroupURL, Channel: cfg.ChannelURL, NumberBot: cfg.NumberBotURL, Developer: cfg.DeveloperURL, Support: cfg.SupportURL}
 
 	otpService := otp.NewService(repo, otpMetrics)
 	otpService.Run(ctx, 8)
 	panelManager := panels.NewManager(repo, cfg.PanelRefreshInterval, cfg.PanelWorkersLimit, panelMetrics)
 	go panelManager.Run(ctx)
-	deliveryService := delivery.NewRouted(repo, registry, cfg.TelegramSendRate, cfg.ChannelURL, cfg.NumberBotURL,
+	deliveryService := delivery.NewRouted(repo, registry, cfg.TelegramSendRate, cfg.GroupURL, cfg.ChannelURL, cfg.NumberBotURL,
 		cfg.DeveloperURL, cfg.SupportURL, deliveryMetrics)
 	deliveryService.Run(ctx, cfg.DeliveryWorkers)
 	webhookservice.New(repo, webhookMetrics).Run(ctx, cfg.WebhookWorkers)
 	scheduledservice.New(repo, registry).Run(ctx)
 	scheduler.New(repo, bot, cfg.Timezone, cfg.ReuseCooldown).Run(ctx)
-	go childbots.New(repo, registry, cfg.ChildRefreshInterval, cfg.HoldDuration, cfg.Timezone, links).Run(ctx)
+	go childbots.New(repo, registry, cfg.ChildRefreshInterval, cfg.HoldDuration, cfg.Timezone, links).SetReuseCooldown(cfg.ReuseCooldown).Run(ctx)
 
 	monitorServer := monitor.New(cfg.HTTPAddr, cfg.MetricsToken, repo, otpMetrics, panelMetrics, deliveryMetrics)
 	monitorErr := make(chan error, 1)
@@ -102,6 +110,7 @@ func run() error {
 
 	telegramApp := telegramapp.New(bot, repo, cfg.HoldDuration, cfg.Timezone)
 	telegramApp.SetLinks(links)
+	telegramApp.SetReuseCooldown(cfg.ReuseCooldown)
 	telegramErr := make(chan error, 1)
 	go func() { telegramErr <- telegramApp.Run(ctx) }()
 
@@ -122,7 +131,6 @@ func run() error {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	bot.StopReceivingUpdates()
 	if err := monitorServer.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}

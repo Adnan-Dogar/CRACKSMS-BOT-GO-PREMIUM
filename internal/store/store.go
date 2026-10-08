@@ -132,6 +132,18 @@ func (s *Store) AssignNumbersForInstance(ctx context.Context, botInstanceID, use
 }
 
 func (s *Store) AcceptOTP(ctx context.Context, event domain.OTPEvent) (domain.AcceptedOTP, error) {
+	valid := len(event.Code) >= 4 && len(event.Code) <= 9
+	if strings.TrimSpace(event.DeliveryStatus) != "" && !strings.EqualFold(strings.TrimSpace(event.DeliveryStatus), "delivered") {
+		valid = false
+	}
+	for _, digit := range event.Code {
+		if digit < '0' || digit > '9' {
+			valid = false
+		}
+	}
+	if !valid {
+		event.Code = ""
+	}
 	event.BotInstanceID = instanceID(event.BotInstanceID)
 	if event.ID == "" {
 		event.ID = newUUID()
@@ -148,14 +160,29 @@ func (s *Store) AcceptOTP(ctx context.Context, event domain.OTPEvent) (domain.Ac
 		return domain.AcceptedOTP{}, err
 	}
 	defer tx.Rollback(ctx)
+	if allowed, e := sharedEventAllowed(ctx, tx, event); e != nil {
+		return domain.AcceptedOTP{}, e
+	} else if !allowed {
+		return domain.AcceptedOTP{Duplicate: true}, nil
+	}
 
+	if event.LegacyDedupKey != "" {
+		var duplicate bool
+		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM otp_events WHERE dedup_key=$1 AND bot_instance_id=$2 AND lower(btrim(service))=lower(btrim($3)))`, event.LegacyDedupKey, event.BotInstanceID, event.Service).Scan(&duplicate); err != nil {
+			return domain.AcceptedOTP{}, err
+		}
+		if duplicate {
+			return domain.AcceptedOTP{Duplicate: true}, nil
+		}
+	}
 	var insertedID string
 	err = tx.QueryRow(ctx, `INSERT INTO otp_events(
-		id,dedup_key,bot_instance_id,panel_id,panel_name,phone,normalized_phone,service,country,message,code,provider_timestamp,received_at)
-		VALUES($1,$2,$3,NULLIF($4,0),$5,$6,$7,$8,$9,$10,$11,$12,$13)
+		id,dedup_key,bot_instance_id,panel_id,panel_name,phone,normalized_phone,service,country,message,code,provider_timestamp,received_at,
+		provider_record_id,sender,delivery_status,provider_range,provider_profit,provider_currency,shared_from_event_id)
+		VALUES($1,$2,$3,NULLIF($4::bigint,0),$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NULLIF($18,'')::numeric,$19,NULLIF($20,'')::uuid)
 		ON CONFLICT(dedup_key) DO NOTHING RETURNING id`, event.ID, event.DedupKey, event.BotInstanceID, event.PanelID,
 		event.PanelName, event.Phone, event.NormalizedPhone, event.Service, event.Country, event.Message, event.Code,
-		event.ProviderTimestamp, event.ReceivedAt).Scan(&insertedID)
+		event.ProviderTimestamp, event.ReceivedAt, event.ProviderRecordID, event.Sender, event.DeliveryStatus, event.ProviderRange, event.ProviderProfit, event.ProviderCurrency, event.SharedFromEventID).Scan(&insertedID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.AcceptedOTP{Duplicate: true}, nil
 	}
@@ -168,6 +195,10 @@ func (s *Store) AcceptOTP(ctx context.Context, event domain.OTPEvent) (domain.Ac
 	var numberID, userID int64
 	var basePrice, basePriceUSD float64
 	var assignedService, assignedCountry string
+	eventTime := event.ReceivedAt
+	if event.ProviderTimestamp != nil {
+		eventTime = *event.ProviderTimestamp
+	}
 	err = tx.QueryRow(ctx, `
 		SELECT a.id,n.id,a.user_id,sc.price_pkr,sc.price_usd,n.service,n.country
 		FROM numbers n
@@ -175,10 +206,13 @@ func (s *Store) AcceptOTP(ctx context.Context, event domain.OTPEvent) (domain.Ac
 		JOIN assignments a ON a.id=an.assignment_id
 		JOIN service_countries sc ON sc.service=n.service AND sc.country=n.country
 		WHERE n.normalized_phone=$1 AND a.bot_instance_id=$2 AND n.state='assigned'
+		  AND n.service_key=lower(btrim($3)) AND $4<>''
+		  AND $5>=a.assigned_at AND $5<=a.expires_at
+		  AND ($6='' OR $6='delivered')
 		  AND a.state='active' AND a.expires_at>now()
 		  AND an.consumed_at IS NULL AND an.released_at IS NULL
 		ORDER BY a.assigned_at DESC LIMIT 1
-		FOR UPDATE OF n,an,a`, event.NormalizedPhone, event.BotInstanceID).Scan(&assignmentID, &numberID, &userID, &basePrice, &basePriceUSD, &assignedService, &assignedCountry)
+		FOR UPDATE OF n,an,a`, event.NormalizedPhone, event.BotInstanceID, event.Service, event.Code, eventTime, strings.ToLower(event.DeliveryStatus)).Scan(&assignmentID, &numberID, &userID, &basePrice, &basePriceUSD, &assignedService, &assignedCountry)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return domain.AcceptedOTP{}, err
 	}
@@ -227,12 +261,13 @@ func (s *Store) AcceptOTP(ctx context.Context, event domain.OTPEvent) (domain.Ac
 			return domain.AcceptedOTP{}, err
 		}
 
-		rewards, rewardTotal, err := s.awardReachedMilestones(ctx, tx, userID, localDate, result.DailyCount)
+		rewards, rewardPKR, rewardUSD, err := s.awardReachedMilestones(ctx, tx, userID, localDate, result.DailyCount)
 		if err != nil {
 			return domain.AcceptedOTP{}, err
 		}
 		result.TriggeredRewards = rewards
-		result.RewardCreditPKR = rewardTotal
+		result.RewardCreditPKR = rewardPKR
+		result.RewardCreditUSD = rewardUSD
 		if _, err = tx.Exec(ctx, `INSERT INTO delivery_jobs(
 			otp_event_id,bot_instance_id,target_kind,target_id,buttons_enabled,theme_id,otp_visibility)
 			SELECT $1,$2,'user',$3,true,COALESCE(up.theme_id,bi.default_theme),'visible'
@@ -265,6 +300,9 @@ func (s *Store) AcceptOTP(ctx context.Context, event domain.OTPEvent) (domain.Ac
 		if err = tx.QueryRow(ctx, `SELECT balance_pkr,balance_usd FROM users WHERE id=$1`, userID).Scan(&result.NewBalancePKR, &result.NewBalanceUSD); err != nil {
 			return domain.AcceptedOTP{}, err
 		}
+	}
+	if err := enqueueChildCopies(ctx, tx, event); err != nil {
+		return domain.AcceptedOTP{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return domain.AcceptedOTP{}, err
@@ -302,61 +340,82 @@ func (s *Store) awardReferralIfQualified(ctx context.Context, tx pgx.Tx, userID 
 	return err
 }
 
-func (s *Store) awardReachedMilestones(ctx context.Context, tx pgx.Tx, userID int64, localDate string, count int) ([]domain.RewardAward, float64, error) {
+func (s *Store) awardReachedMilestones(ctx context.Context, tx pgx.Tx, userID int64, localDate string, count int) ([]domain.RewardAward, float64, float64, error) {
 	rows, err := tx.Query(ctx, `
 		WITH selected AS (
 		  SELECT id FROM reward_schedules
 		  WHERE enabled AND effective_from<=$2::date AND (user_id=$1 OR user_id IS NULL)
 		  ORDER BY (user_id IS NOT NULL) DESC, id DESC LIMIT 1)
-		SELECT rr.id,rr.threshold,rr.reward_pkr
+		SELECT rr.id,rr.threshold,rr.reward_pkr,rr.reward_usd,rr.max_users
 		FROM reward_rules rr JOIN selected s ON s.id=rr.schedule_id
-		WHERE rr.threshold<=$3 ORDER BY rr.threshold`, userID, localDate, count)
+		WHERE rr.threshold<=$3 ORDER BY rr.threshold,rr.id FOR UPDATE OF rr`, userID, localDate, count)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	type reachedRule struct {
 		id        int64
 		threshold int
-		amount    float64
+		amountPKR float64
+		amountUSD float64
+		maxUsers  int
 	}
 	var rules []reachedRule
 	for rows.Next() {
 		var rule reachedRule
-		if err := rows.Scan(&rule.id, &rule.threshold, &rule.amount); err != nil {
+		if err := rows.Scan(&rule.id, &rule.threshold, &rule.amountPKR, &rule.amountUSD, &rule.maxUsers); err != nil {
 			rows.Close()
-			return nil, 0, err
+			return nil, 0, 0, err
 		}
 		rules = append(rules, rule)
 	}
 	rows.Close()
 	var awards []domain.RewardAward
-	var total float64
+	var totalPKR, totalUSD float64
 	for _, rule := range rules {
+		if rule.maxUsers > 0 {
+			var alreadyAwarded bool
+			var awardedUsers int
+			if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM reward_awards WHERE rule_id=$1 AND user_id=$2),count(DISTINCT user_id) FROM reward_awards WHERE rule_id=$1`, rule.id, userID).Scan(&alreadyAwarded, &awardedUsers); err != nil {
+				return nil, 0, 0, err
+			}
+			if alreadyAwarded || awardedUsers >= rule.maxUsers {
+				continue
+			}
+		}
 		var awardID int64
-		err := tx.QueryRow(ctx, `INSERT INTO reward_awards(user_id,local_date,rule_id,otp_count,amount_pkr)
-			VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING RETURNING id`,
-			userID, localDate, rule.id, count, rule.amount).Scan(&awardID)
+		err := tx.QueryRow(ctx, `INSERT INTO reward_awards(user_id,local_date,rule_id,otp_count,amount_pkr,amount_usd)
+			VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING RETURNING id`,
+			userID, localDate, rule.id, count, rule.amountPKR, rule.amountUSD).Scan(&awardID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			continue
 		}
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, 0, err
 		}
-		if _, err = tx.Exec(ctx, `INSERT INTO balance_ledger(user_id,currency,amount,entry_type,reference_type,reference_id)
-			VALUES($1,'PKR',$2,'milestone_reward','reward_award',$3)`, userID, rule.amount, fmt.Sprint(awardID)); err != nil {
-			return nil, 0, err
+		if rule.amountPKR > 0 {
+			if _, err = tx.Exec(ctx, `INSERT INTO balance_ledger(user_id,currency,amount,entry_type,reference_type,reference_id)
+				VALUES($1,'PKR',$2,'milestone_reward','reward_award',$3)`, userID, rule.amountPKR, fmt.Sprint(awardID)); err != nil {
+				return nil, 0, 0, err
+			}
 		}
-		if _, err = tx.Exec(ctx, `UPDATE users SET balance_pkr=balance_pkr+$2 WHERE id=$1`, userID, rule.amount); err != nil {
-			return nil, 0, err
+		if rule.amountUSD > 0 {
+			if _, err = tx.Exec(ctx, `INSERT INTO balance_ledger(user_id,currency,amount,entry_type,reference_type,reference_id)
+				VALUES($1,'USD',$2,'milestone_reward','reward_award',$3)`, userID, rule.amountUSD, fmt.Sprint(awardID)); err != nil {
+				return nil, 0, 0, err
+			}
 		}
-		if _, err = tx.Exec(ctx, `UPDATE user_daily_progress SET reward_earnings_pkr=reward_earnings_pkr+$3
-			WHERE user_id=$1 AND local_date=$2`, userID, localDate, rule.amount); err != nil {
-			return nil, 0, err
+		if _, err = tx.Exec(ctx, `UPDATE users SET balance_pkr=balance_pkr+$2,balance_usd=balance_usd+$3 WHERE id=$1`, userID, rule.amountPKR, rule.amountUSD); err != nil {
+			return nil, 0, 0, err
 		}
-		awards = append(awards, domain.RewardAward{Threshold: rule.threshold, AmountPKR: rule.amount})
-		total += rule.amount
+		if _, err = tx.Exec(ctx, `UPDATE user_daily_progress SET reward_earnings_pkr=reward_earnings_pkr+$3,reward_earnings_usd=reward_earnings_usd+$4
+			WHERE user_id=$1 AND local_date=$2`, userID, localDate, rule.amountPKR, rule.amountUSD); err != nil {
+			return nil, 0, 0, err
+		}
+		awards = append(awards, domain.RewardAward{Threshold: rule.threshold, AmountPKR: rule.amountPKR, AmountUSD: rule.amountUSD})
+		totalPKR += rule.amountPKR
+		totalUSD += rule.amountUSD
 	}
-	return awards, total, nil
+	return awards, totalPKR, totalUSD, nil
 }
 
 func (s *Store) RecycleExpiredAssignments(ctx context.Context, reuseCooldown time.Duration, batch int) (domain.RecycleResult, error) {

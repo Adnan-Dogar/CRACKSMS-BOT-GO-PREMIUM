@@ -20,37 +20,46 @@ import (
 func compactMenu(admin, isMain bool) premium.InlineKeyboard {
 	rows := [][]premium.InlineButton{
 		{premium.Button("Get Number", "menu:services", "success", "phone")},
+		{premium.Button("Live OTP", "menu:liveotp", "primary", "live"), premium.Button("My Account", "menu:profile", "primary", "user")},
+		{premium.Button("Top Apps", "activity:apps:24h:0", "primary", "ranking"), premium.Button("Top Countries", "activity:topcountries:24h:0", "primary", "globe")},
+		{premium.Button("Favorites", "tools:favorites:0", "primary", "favorite"), premium.Button("My Statistics", "menu:stats", "primary", "chart")},
+		{premium.Button("History", "menu:history:0", "primary", "history"), premium.Button("Settings", "menu:settings", "primary", "settings")},
+		{premium.Button("Help", "menu:help", "primary", "help"), premium.Button("More Options", "menu:full", "primary", "list")},
 	}
 	if isMain {
 		rows = append(rows, []premium.InlineButton{premium.Button("Create My Bot", "menu:createbot", "success", "bot")})
-	} else {
-		rows = append(rows, []premium.InlineButton{premium.Button("My Profile", "menu:profile", "primary", "money")})
 	}
-	rows = append(rows,
-		[]premium.InlineButton{premium.Button("My Stats", "menu:stats", "primary", "chart"), premium.Button("My History", "menu:history:0", "success", "history")},
-		[]premium.InlineButton{premium.Button("My OTPs", "menu:history:0", "danger", "otp"), premium.Button("Premium", "menu:premium", "success", "premium")},
-	)
-	settingsRow := []premium.InlineButton{}
-	if isMain {
-		settingsRow = append(settingsRow, premium.Button("Analytics", "menu:analytics", "primary", "chart"))
-	}
-	settingsRow = append(settingsRow, premium.Button("Settings", "menu:settings", "primary", "settings"))
-	rows = append(rows, settingsRow, []premium.InlineButton{premium.Button("More Options", "menu:full", "primary", "link")})
 	if admin {
-		rows = append(rows, []premium.InlineButton{premium.Button("Admin Dashboard", "menu:admin", "danger", "admin")})
+		rows = append(rows, []premium.InlineButton{premium.Button("Admin Dashboard", "menu:admin", "primary", "admin")})
 	}
+
 	return premium.InlineKeyboard{InlineKeyboard: rows}
 }
 
 func fullMenu(admin, isMain bool, links themes.Links) premium.InlineKeyboard {
-	rows := compactMenu(false, isMain).InlineKeyboard
-	// Replace the compact menu's final "More" row with the complete navigation.
-	rows = rows[:len(rows)-1]
+	rows := [][]premium.InlineButton{}
+	for _, row := range compactMenu(false, isMain).InlineKeyboard {
+		containsMore := false
+		for _, button := range row {
+			if button.CallbackData == "menu:full" {
+				containsMore = true
+			}
+		}
+		if !containsMore {
+			rows = append(rows, row)
+		}
+	}
+	// Keep main entry points and add the less frequently used tools.
 	rows = append(rows,
-		[]premium.InlineButton{premium.Button("Tutorials", "menu:tutorials", "primary", "message"), premium.Button("OTP Themes", "menu:themes", "success", "celebrate")},
+		[]premium.InlineButton{premium.Button("Repeat Selection", "tools:last", "primary", "refresh"), premium.Button("Withdraw", "menu:withdraw", "success", "withdraw")},
+		[]premium.InlineButton{premium.Button("Tutorials", "menu:tutorials", "primary", "book"), premium.Button("OTP Themes", "menu:themes", "primary", "palette")},
 		[]premium.InlineButton{premium.Button("Webhooks", "menu:webhooks", "primary", "link"), premium.Button("Scheduling", "menu:schedule", "primary", "settings")},
-		[]premium.InlineButton{premium.Button("API Access", "menu:api", "danger", "developer"), premium.Button("My Bots", "menu:mybots", "primary", "bot")},
+		[]premium.InlineButton{premium.Button("API Access", "menu:api", "primary", "developer"), premium.Button("Number Alerts", "tools:alerts:0", "primary", "bell")},
+		[]premium.InlineButton{premium.Button("Premium", "menu:premium", "primary", "premium"), premium.Button("Analytics", "menu:analytics", "primary", "chart")},
 	)
+	if isMain {
+		rows = append(rows, []premium.InlineButton{premium.Button("My Bots", "menu:mybots", "primary", "bot")})
+	}
 	var community []premium.InlineButton
 	if isMain && links.Channel != "" {
 		community = append(community, premium.InlineButton{Text: "Channel", URL: links.Channel, Style: "success", IconCustomEmojiID: premium.ID("channel")})
@@ -66,7 +75,7 @@ func fullMenu(admin, isMain bool, links themes.Links) premium.InlineKeyboard {
 		contacts = append(contacts, premium.InlineButton{Text: "Developer", URL: links.Developer, Style: "primary", IconCustomEmojiID: premium.ID("developer")})
 	}
 	if links.Support != "" {
-		contacts = append(contacts, premium.InlineButton{Text: "Support", URL: links.Support, Style: "danger", IconCustomEmojiID: premium.ID("support")})
+		contacts = append(contacts, premium.InlineButton{Text: "Support", URL: links.Support, Style: "primary", IconCustomEmojiID: premium.ID("support")})
 	}
 	if len(contacts) > 0 {
 		rows = append(rows, contacts)
@@ -85,9 +94,10 @@ func adminDashboard() premium.InlineKeyboard {
 		{premium.Button("Panels", "admin:panels", "primary", "chart"), premium.Button("OTP Groups", "admin:groups", "success", "channel")},
 		{premium.Button("Rewards", "admin:rewards", "success", "money"), premium.Button("Withdrawals", "admin:withdrawals", "danger", "money")},
 		{premium.Button("Child Bots", "admin:bots", "primary", "bot"), premium.Button("Admins", "admin:admins", "danger", "admin")},
+		{premium.Button("User Backups", "admin:backups", "primary", "download")},
 		{premium.Button("Required Chats", "admin:required", "primary", "lock"), premium.Button("OTP Patterns", "admin:patterns", "primary", "otp")},
 		{premium.Button("Tutorials", "admin:tutorials", "primary", "message"), premium.Button("Settings", "admin:settings", "primary", "settings")},
-		{premium.Button("Help", "menu:help", "danger", "support"), premium.Button("Main Menu", "menu:compact", "primary", "phone")},
+		{premium.Button("Help", "menu:help", "danger", "support"), premium.Button("Main Menu", "menu:home", "primary", "phone")},
 	}}
 }
 
@@ -110,50 +120,8 @@ func (a *App) rateLimited(userID int64) bool {
 	return false
 }
 
-func adminCommandPermission(command string) string {
-	switch command {
-	case "addgroup", "groups", "groupbuttons", "groupenable", "groupprivacy", "grouptheme", "removegroup":
-		return "manage_groups"
-	case "setrewards", "rewards", "clearreward":
-		return "manage_rewards"
-	case "addpanel", "panels", "panelhealth", "paneltoggle":
-		return "manage_panels"
-	case "addrequired", "required", "removerequired", "settheme":
-		return "manage_settings"
-	case "addadmin", "removeadmin":
-		return "manage_admins"
-	case "withdrawapprove", "withdrawreject":
-		return "manage_withdrawals"
-	case "broadcast":
-		return "broadcast"
-	case "settier":
-		return "manage_tiers"
-	case "tutorialadd", "tutorialremove":
-		return "manage_tutorials"
-	case "botinstances", "botapprove", "botreject", "bottoggle":
-		return "manage_bots"
-	case "systemstats", "stats":
-		return "view_analytics"
-	case "patternadd", "patterns", "patternremove":
-		return "manage_patterns"
-	default:
-		return ""
-	}
-}
-
 func (a *App) handleMyStats(ctx context.Context, chatID, userID int64) {
-	stats, err := a.store.UserStatsForInstance(ctx, a.botInstanceID, userID)
-	if err != nil {
-		a.sendError(chatID, err)
-		return
-	}
-	tier, _ := a.store.UserTier(ctx, a.botInstanceID, userID)
-	text := fmt.Sprintf("%s <b>My Statistics</b>\n\n💎 Tier: <b>%s</b>\n✅ Total OTPs: <b>%d</b>\n📅 Today: <b>%d</b>\n📱 Active numbers: <b>%d</b>\n💵 Today earnings: <b>%.2f PKR</b>\n🎁 Today rewards: <b>%.2f PKR</b>\n💰 Balance: <b>%.2f PKR</b> · <b>%.4f USD</b>",
-		premium.Emoji("chart", "📊"), strings.ToUpper(tier), stats.TotalOTPs, stats.TodayOTPs, stats.ActiveNumbers,
-		stats.BaseTodayPKR, stats.RewardsTodayPKR, stats.BalancePKR, stats.BalanceUSD)
-	a.sendHTML(chatID, text, premium.InlineKeyboard{InlineKeyboard: [][]premium.InlineButton{{
-		premium.Button("History", "menu:history:0", "primary", "history"), premium.Button("Premium", "menu:premium", "success", "premium"),
-	}}})
+	a.showPeriodStats(ctx, chatID, userID, "today", false)
 }
 
 func (a *App) handleHistory(ctx context.Context, chatID, userID int64, offset int) {
@@ -183,16 +151,21 @@ func (a *App) handleHistory(ctx context.Context, chatID, userID int64, offset in
 	if len(nav) > 0 {
 		rows = append(rows, nav)
 	}
-	rows = append(rows, []premium.InlineButton{premium.Button("Main Menu", "menu:compact", "primary", "phone")})
+	rows = append(rows, []premium.InlineButton{premium.Button("Main Menu", "menu:home", "primary", "phone")})
 	a.sendHTML(chatID, text.String(), premium.InlineKeyboard{InlineKeyboard: rows})
 }
 
 func (a *App) handleTheme(ctx context.Context, message *tgbotapi.Message, command, args string) {
 	if command == "otpguipreview" {
 		event := domain.OTPEvent{PanelName: "Preview Panel", NormalizedPhone: "923001234567", Service: "WhatsApp", Code: "123456", Message: "Your WhatsApp verification code is 123456"}
+		links, err := a.store.EffectiveLinks(ctx, a.botInstanceID, a.links)
+		if err != nil {
+			a.sendError(message.Chat.ID, err)
+			return
+		}
 		for _, theme := range themes.Catalog() {
-			a.sendHTML(message.Chat.ID, fmt.Sprintf("<b>T%d · %s</b>\n\n%s", theme.ID, theme.Name,
-				themes.Format(event, theme.ID, true, "visible")), themes.Keyboard(event, theme.ID, a.links, true))
+			a.sendLegacyHTML(message.Chat.ID, fmt.Sprintf("<b>T%d · %s</b>\n\n%s", theme.ID, theme.Name,
+				themes.Format(event, theme.ID, true, "visible")), themes.Keyboard(event, theme.ID, links, true, true))
 		}
 		return
 	}
@@ -239,7 +212,7 @@ func (a *App) handlePremium(ctx context.Context, chatID, userID int64) {
 	a.sendHTML(chatID, text, premium.InlineKeyboard{InlineKeyboard: [][]premium.InlineButton{{
 		premium.Button("Analytics", "menu:analytics", "primary", "chart"), premium.Button("Themes", "menu:themes", "success", "celebrate"),
 	}, {
-		premium.Button("Main Menu", "menu:compact", "primary", "phone"),
+		premium.Button("Main Menu", "menu:home", "primary", "phone"),
 	}}})
 }
 
@@ -249,11 +222,11 @@ func (a *App) handleAnalytics(ctx context.Context, chatID, userID int64) {
 		a.sendHTML(chatID, "📊 Advanced analytics require the <b>Pro</b> or <b>Enterprise</b> tier.", nil)
 		return
 	}
-	a.sendAnalytics(ctx, chatID, false)
+	a.showPeriodStats(ctx, chatID, userID, "today", false)
 }
 
 func (a *App) handleAnalyticsAdmin(ctx context.Context, chatID int64) {
-	a.sendAnalytics(ctx, chatID, true)
+	a.showPeriodStats(ctx, chatID, 0, "today", true)
 }
 
 func (a *App) sendAnalytics(ctx context.Context, chatID int64, admin bool) {
@@ -318,11 +291,14 @@ func (a *App) handleWebhook(ctx context.Context, message *tgbotapi.Message, args
 		}
 		var text strings.Builder
 		text.WriteString("🔗 <b>My Webhooks</b>\n")
+		if len(items) == 0 {
+			text.WriteString("\nNo webhooks configured yet.\n")
+		}
 		for _, item := range items {
 			fmt.Fprintf(&text, "\n#%d · %s\nEnabled: %s · failures: %d\n", item.ID, html.EscapeString(item.URL), onOff(item.Enabled), item.ConsecutiveFailures)
 		}
-		text.WriteString("\nAdd: <code>/webhook add|https://host/path|otp.received</code>")
-		a.sendHTML(message.Chat.ID, text.String(), nil)
+		text.WriteString("\nUse the buttons below to manage your webhooks.")
+		a.sendHTML(message.Chat.ID, text.String(), integrationMenu("webhook", "unhook"))
 	}
 }
 
@@ -385,11 +361,14 @@ func (a *App) handleSchedule(ctx context.Context, message *tgbotapi.Message, arg
 		}
 		var text strings.Builder
 		text.WriteString("⏰ <b>Scheduled Messages</b>\n")
+		if len(items) == 0 {
+			text.WriteString("\nNo scheduled messages yet.\n")
+		}
 		for _, item := range items {
 			fmt.Fprintf(&text, "\n#%d · %s · %s\n%s\n", item.ID, item.DeliverAt.In(a.location).Format("02 Jan 03:04 PM"), item.TargetKind, html.EscapeString(short(item.Body, 80)))
 		}
-		text.WriteString("\nAdd with <code>/schedule add|time|target|message</code>")
-		a.sendHTML(message.Chat.ID, text.String(), nil)
+		text.WriteString("\nUse the buttons below to manage scheduled messages.")
+		a.sendHTML(message.Chat.ID, text.String(), integrationMenu("schedule", "unschedule"))
 	}
 }
 
@@ -430,11 +409,14 @@ func (a *App) handleAPIKey(ctx context.Context, message *tgbotapi.Message, args 
 		}
 		var text strings.Builder
 		text.WriteString("⚡ <b>Enterprise API Keys</b>\n")
+		if len(keys) == 0 {
+			text.WriteString("\nNo API keys created yet.\n")
+		}
 		for _, key := range keys {
 			fmt.Fprintf(&text, "\n#%d · %s · <code>%s…</code> · %s\n", key.ID, html.EscapeString(key.Name), key.Prefix, onOff(key.Enabled))
 		}
-		text.WriteString("\nCreate: <code>/apikey create|name</code>\nEndpoints: <code>/api/v1/me</code>, <code>/api/v1/analytics</code>, <code>/api/v1/otp/history</code>")
-		a.sendHTML(message.Chat.ID, text.String(), nil)
+		text.WriteString("\nEndpoints: <code>/api/v1/me</code>, <code>/api/v1/analytics</code>, <code>/api/v1/otp/history</code>")
+		a.sendHTML(message.Chat.ID, text.String(), integrationMenu("apikey", "revoke"))
 	}
 }
 
@@ -472,7 +454,7 @@ func (a *App) sendTutorial(ctx context.Context, chatID, id int64) {
 		media.Caption, media.ParseMode = caption, tgbotapi.ModeHTML
 		_, err = a.bot.Send(media)
 	default:
-		a.sendHTML(chatID, caption, nil)
+		a.sendDocument(chatID, screenDocument{RichHTML: "<h2>" + premium.Emoji("book", "📚") + " " + html.EscapeString(item.Title) + "</h2><p>" + html.EscapeString(item.Description) + "</p><p>" + strings.ReplaceAll(item.Body, "\n", "<br>") + "</p>", ClassicHTML: caption, Keyboard: premium.InlineKeyboard{InlineKeyboard: [][]premium.InlineButton{{premium.Button("Tutorials", "menu:tutorials", "primary", "book"), premium.Button("Home", "menu:home", "", "home")}}}})
 	}
 	if err != nil {
 		a.sendError(chatID, err)
@@ -480,14 +462,7 @@ func (a *App) sendTutorial(ctx context.Context, chatID, id int64) {
 }
 
 func (a *App) handleSettings(ctx context.Context, chatID, userID int64) {
-	pref, err := a.store.Preference(ctx, a.botInstanceID, userID)
-	if err != nil {
-		a.sendError(chatID, err)
-		return
-	}
-	theme, _ := a.store.EffectiveTheme(ctx, a.botInstanceID, userID)
-	a.sendHTML(chatID, fmt.Sprintf("⚙️ <b>Settings</b>\n\n🎨 OTP theme: <b>T%d · %s</b>\n🌐 Language: <b>%s</b>\n🕓 Time zone: <b>%s</b>\n📋 Menu: <b>%s</b>\n\nUse the premium controls below or <code>/theme 0-9</code>.",
-		theme, themes.Get(theme).Name, html.EscapeString(pref.Language), html.EscapeString(pref.Timezone), map[bool]string{true: "compact", false: "full"}[pref.CompactMenu]), settingsMenu())
+	a.showUserSettings(ctx, chatID, userID)
 }
 
 var childTokenPattern = regexp.MustCompile(`^[0-9]{6,14}:[A-Za-z0-9_-]{30,}$`)
@@ -498,7 +473,9 @@ func (a *App) handleCreateBot(ctx context.Context, message *tgbotapi.Message, ar
 		return
 	}
 	// Tokens are credentials: remove the command before any further processing.
-	_, _ = a.bot.Request(tgbotapi.NewDeleteMessage(message.Chat.ID, message.MessageID))
+	if message.MessageID != 0 {
+		_, _ = a.bot.Request(tgbotapi.NewDeleteMessage(message.Chat.ID, message.MessageID))
+	}
 	parts := splitExact(args, "|", 2)
 	if len(parts) != 2 || !childTokenPattern.MatchString(parts[1]) {
 		a.sendHTML(message.Chat.ID, "Usage: <code>/createbot Bot Name|123456:BotFatherToken</code>\nThe credential message is deleted automatically.", nil)
@@ -520,6 +497,9 @@ func (a *App) handleMyBots(ctx context.Context, chatID, ownerID int64) {
 	}
 	var text strings.Builder
 	text.WriteString("🤖 <b>My Child Bots</b>\n")
+	if len(items) == 0 {
+		text.WriteString("\nNo child bots requested yet.")
+	}
 	for _, item := range items {
 		fmt.Fprintf(&text, "\n#%d · %s · %s\nTier: %s · @%s\n", item.ID, html.EscapeString(item.Name), item.Status, item.Tier, html.EscapeString(item.Username))
 	}
@@ -564,28 +544,7 @@ func (a *App) adminAddTutorial(ctx context.Context, message *tgbotapi.Message, a
 }
 
 func (a *App) adminListBots(ctx context.Context, chatID int64) {
-	items, err := a.store.ListBotInstances(ctx, false)
-	if err != nil {
-		a.sendError(chatID, err)
-		return
-	}
-	var text strings.Builder
-	text.WriteString("🤖 <b>Bot Instances</b>\n")
-	for _, item := range items {
-		if item.IsMain {
-			continue
-		}
-		owner := int64(0)
-		if item.OwnerUserID != nil {
-			owner = *item.OwnerUserID
-		}
-		fmt.Fprintf(&text, "\n#%d · %s · %s · %s\nOwner: <code>%d</code> · @%s\n", item.ID,
-			html.EscapeString(item.Name), item.Status, item.Tier, owner, html.EscapeString(item.Username))
-		if item.LastError != "" {
-			fmt.Fprintf(&text, "Error: %s\n", html.EscapeString(item.LastError))
-		}
-	}
-	a.sendHTML(chatID, text.String(), adminBotsMenu(items))
+	a.showBots(ctx, chatID, "all", 0)
 }
 
 func (a *App) adminApproveBot(ctx context.Context, message *tgbotapi.Message, args string) {

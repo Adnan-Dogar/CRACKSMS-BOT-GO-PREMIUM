@@ -14,7 +14,16 @@ func (s *Store) EnqueuePanelEvents(ctx context.Context, panelID int64, events []
 		return err
 	}
 	defer tx.Rollback(ctx)
+	var lastSMS *time.Time
 	for _, event := range events {
+		t := event.ReceivedAt
+		if event.ProviderTimestamp != nil {
+			t = *event.ProviderTimestamp
+		}
+		if lastSMS == nil || t.After(*lastSMS) {
+			copy := t
+			lastSMS = &copy
+		}
 		raw, err := json.Marshal(event)
 		if err != nil {
 			return err
@@ -26,8 +35,19 @@ func (s *Store) EnqueuePanelEvents(ctx context.Context, panelID int64, events []
 			return err
 		}
 	}
+	var progress struct {
+		Page     int  `json:"page"`
+		LastPage int  `json:"last_page"`
+		Done     bool `json:"done"`
+	}
+	_ = json.Unmarshal([]byte(cursor), &progress)
+	backlog := max(0, progress.LastPage-progress.Page+1)
+	if progress.Done {
+		backlog = 0
+	}
 	if _, err := tx.Exec(ctx, `UPDATE panels SET healthy=true,consecutive_failures=0,last_cursor=$2,
-		last_success_at=now(),last_error='',updated_at=now() WHERE id=$1`, panelID, cursor); err != nil {
+		last_sms_at=GREATEST(last_sms_at,$3::timestamptz),backlog_pages=$4,
+		last_success_at=now(),last_error='',updated_at=now() WHERE id=$1`, panelID, cursor, lastSMS, backlog); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
