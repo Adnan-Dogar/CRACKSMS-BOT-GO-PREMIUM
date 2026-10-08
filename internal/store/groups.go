@@ -89,7 +89,7 @@ func (s *Store) RemoveOTPGroupForInstance(ctx context.Context, botInstanceID, ch
 
 func (s *Store) SetOTPGroupPrivacy(ctx context.Context, botInstanceID, chatID int64, privacy string) error {
 	if privacy != "visible" && privacy != "masked" && privacy != "hidden" {
-		return errors.New("privacy must be visible, masked, or hidden")
+		return invalidInput("privacy must be visible, masked, or hidden")
 	}
 	tag, err := s.pool.Exec(ctx, `UPDATE otp_group_destinations SET otp_visibility=$3 WHERE bot_instance_id=$1 AND chat_id=$2`,
 		instanceID(botInstanceID), chatID, privacy)
@@ -101,7 +101,7 @@ func (s *Store) SetOTPGroupPrivacy(ctx context.Context, botInstanceID, chatID in
 
 func (s *Store) SetOTPGroupTheme(ctx context.Context, botInstanceID, chatID int64, themeID *int) error {
 	if themeID != nil && (*themeID < 0 || *themeID > 9) {
-		return errors.New("theme must be between 0 and 9")
+		return invalidInput("theme must be between 0 and 9")
 	}
 	tag, err := s.pool.Exec(ctx, `UPDATE otp_group_destinations SET theme_id=$3 WHERE bot_instance_id=$1 AND chat_id=$2`,
 		instanceID(botInstanceID), chatID, themeID)

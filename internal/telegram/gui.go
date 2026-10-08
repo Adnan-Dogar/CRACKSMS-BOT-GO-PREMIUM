@@ -46,8 +46,8 @@ func (a *App) showUserSettings(ctx context.Context, chat, user int64) {
 	if !pref.CompactMenu {
 		mode = "Full"
 	}
-	text := fmt.Sprintf("⚙️ <b>Your Settings</b>\n\n🎨 OTP theme: <b>T%d</b>\n🕓 Timezone: <b>%s</b>\n📋 Main menu: <b>%s</b>\n\nTap a preference to change it. Changes are saved for this bot.", theme, html.EscapeString(pref.Timezone), mode)
-	text += "\nDisplay: <b>" + html.EscapeString(pref.DisplayFormat) + "</b>"
+	text := fmt.Sprintf("⚙️ <b>Your Settings</b>\n\n🎨 OTP theme: <b>T%d · %s</b>\n🕓 Timezone: <b>%s</b>\n📋 Main menu: <b>%s</b>\n🖥 Display: <b>%s</b>\n\nTap a preference to change it. Changes are saved for this bot.",
+		theme, html.EscapeString(themes.Get(theme).Name), html.EscapeString(pref.Timezone), mode, html.EscapeString(capitalize(pref.DisplayFormat)))
 	menu := settingsMenu()
 	menu.InlineKeyboard = append([][]premium.InlineButton{{premium.Button("Compact Menu", "prefs:mode:compact", activeStyle(pref.CompactMenu), "list"), premium.Button("Full Menu", "prefs:mode:full", activeStyle(!pref.CompactMenu), "list")}, {premium.Button("Change Timezone", "prefs:timezone", "primary", "clock")}}, menu.InlineKeyboard...)
 	rows := [][]premium.InlineButton{}
@@ -356,7 +356,7 @@ func (a *App) showBots(ctx context.Context, chat int64, status string, page int)
 	for _, pair := range [][]string{{"all", "pending"}, {"running", "stopped"}, {"error"}} {
 		row := []premium.InlineButton{}
 		for _, filter := range pair {
-			row = append(row, premium.Button(strings.Title(filter), fmt.Sprintf("admin:bots:filter:%s:0", filter), activeStyle(status == filter), "bot"))
+			row = append(row, premium.Button(capitalize(filter), fmt.Sprintf("admin:bots:filter:%s:0", filter), activeStyle(status == filter), "bot"))
 		}
 		rows = append(rows, row)
 	}

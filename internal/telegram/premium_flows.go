@@ -106,6 +106,13 @@ func (a *App) rateLimited(userID int64) bool {
 	cutoff := now.Add(-time.Minute)
 	a.rateMu.Lock()
 	defer a.rateMu.Unlock()
+	if len(a.rateWindow) >= 4096 {
+		for id, window := range a.rateWindow {
+			if len(window) == 0 || !window[len(window)-1].After(cutoff) {
+				delete(a.rateWindow, id)
+			}
+		}
+	}
 	items := a.rateWindow[userID][:0]
 	for _, item := range a.rateWindow[userID] {
 		if item.After(cutoff) {
@@ -227,26 +234,6 @@ func (a *App) handleAnalytics(ctx context.Context, chatID, userID int64) {
 
 func (a *App) handleAnalyticsAdmin(ctx context.Context, chatID int64) {
 	a.showPeriodStats(ctx, chatID, 0, "today", true)
-}
-
-func (a *App) sendAnalytics(ctx context.Context, chatID int64, admin bool) {
-	data, err := a.store.Analytics(ctx, a.botInstanceID)
-	if err != nil {
-		a.sendError(chatID, err)
-		return
-	}
-	text := fmt.Sprintf("📊 <b>Analytics Dashboard</b>\n\n👥 Users: <b>%d</b> · active 24h: <b>%d</b>\n🔑 OTP events: <b>%d</b> · credited: <b>%d</b> · today: <b>%d</b>\n📱 Numbers: <b>%d available</b> · <b>%d active assignments</b>\n📡 Panels: <b>%d/%d healthy</b>\n📨 Delivery queue: <b>%d</b> · failed: <b>%d</b>\n🔗 Webhook queue: <b>%d</b>\n⏰ Scheduled: <b>%d</b>",
-		data.Users, data.ActiveUsers24H, data.TotalOTPs, data.CountedOTPs, data.OTPsToday,
-		data.AvailableNumbers, data.AssignedNumbers, data.ActivePanels, data.TotalPanels,
-		data.DeliveryPending, data.DeliveryFailed, data.WebhookPending, data.ScheduledPending)
-	markup := userBackMenu()
-	if admin {
-		markup = premium.InlineKeyboard{InlineKeyboard: [][]premium.InlineButton{
-			{premium.Button("Panels", "admin:panels", "primary", "chart"), premium.Button("OTP Groups", "admin:groups", "success", "channel")},
-			{premium.Button("Admin Home", "menu:admin", "primary", "admin")},
-		}}
-	}
-	a.sendHTML(chatID, text, markup)
 }
 
 func (a *App) handleWebhook(ctx context.Context, message *tgbotapi.Message, args string) {

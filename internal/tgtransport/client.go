@@ -53,6 +53,14 @@ func (c *Client) wait(ctx context.Context, chat string) error {
 		if ready {
 			c.tokens--
 			if chat != "" {
+				if len(c.chatAt) >= 4096 {
+					// Long-running bots talk to many chats; forget expired slots.
+					for key, at := range c.chatAt {
+						if now.After(at) {
+							delete(c.chatAt, key)
+						}
+					}
+				}
 				c.chatAt[chat] = now.Add(time.Second)
 			}
 			c.mu.Unlock()

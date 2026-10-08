@@ -503,7 +503,7 @@ func adminThemesMenu(active int) premium.InlineKeyboard {
 func confirmationMenu(confirmCallback, cancelCallback string) premium.InlineKeyboard {
 	return premium.InlineKeyboard{InlineKeyboard: [][]premium.InlineButton{{
 		premium.Button("Confirm", confirmCallback, "danger", "check"),
-		premium.Button("Cancel", cancelCallback, "success", "support"),
+		premium.Button("Go Back", cancelCallback, "primary", "back"),
 	}}}
 }
 

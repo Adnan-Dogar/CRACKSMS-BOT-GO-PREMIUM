@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -14,7 +15,7 @@ import (
 func (s *Store) AddNumbers(ctx context.Context, service, country, countryCode string, pricePKR, priceUSD float64, perCycle int, phones []string) (int, error) {
 	service, country = strings.TrimSpace(service), strings.TrimSpace(country)
 	if service == "" || country == "" {
-		return 0, errors.New("service and country are required")
+		return 0, invalidInput("service and country are required")
 	}
 	if perCycle <= 0 {
 		perCycle = 3
@@ -151,8 +152,8 @@ func (s *Store) CreateWithdrawalForAccount(ctx context.Context, botInstanceID, u
 }
 
 func (s *Store) createWithdrawalForInstance(ctx context.Context, botInstanceID, userID, accountID int64, method string, amountPKR, amountUSD float64, detailsHint, details string) (int64, error) {
-	if amountPKR <= 0 && amountUSD <= 0 {
-		return 0, errors.New("withdrawal amount must be positive")
+	if !validAmount(amountPKR) || !validAmount(amountUSD) || (amountPKR == 0 && amountUSD == 0) {
+		return 0, invalidInput("withdrawal amount must be positive")
 	}
 	encrypted, err := s.cipher.Encrypt([]byte(details))
 	if err != nil {
@@ -172,7 +173,7 @@ func (s *Store) createWithdrawalForInstance(ctx context.Context, botInstanceID, 
 		return 0, err
 	}
 	if amountPKR > pkr || amountUSD > usd {
-		return 0, errors.New("insufficient balance")
+		return 0, invalidInput("insufficient balance")
 	}
 	var id int64
 	if err := tx.QueryRow(ctx, `INSERT INTO withdrawals(bot_instance_id,user_id,account_id,method,amount_pkr,amount_usd,details,details_config)
@@ -300,4 +301,12 @@ func SortedServices(catalog map[string][]CatalogCountry) []string {
 	}
 	sort.Strings(services)
 	return services
+}
+
+// TodayOTPCount returns the user's counted OTPs for the current local day.
+func (s *Store) TodayOTPCount(ctx context.Context, userID int64) (int, error) {
+	var count int
+	err := s.pool.QueryRow(ctx, `SELECT COALESCE((SELECT otp_count FROM user_daily_progress WHERE user_id=$1 AND local_date=$2::date),0)`,
+		userID, time.Now().In(s.location).Format("2006-01-02")).Scan(&count)
+	return count, err
 }

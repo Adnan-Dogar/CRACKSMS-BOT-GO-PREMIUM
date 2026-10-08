@@ -125,9 +125,9 @@ func (a *App) confirmWithdrawal(ctx context.Context, callback *tgbotapi.Callback
 		return
 	}
 	accountID, err1 := strconv.ParseInt(flow.Data["account_id"], 10, 64)
-	amount, err2 := strconv.ParseFloat(flow.Data["amount"], 64)
+	amount, amountOK := parsePositiveAmount(flow.Data["amount"])
 	account, err3 := a.store.WithdrawalAccount(ctx, a.botInstanceID, userID, accountID)
-	if err1 != nil || err2 != nil || err3 != nil || amount <= 0 {
+	if err1 != nil || !amountOK || err3 != nil {
 		a.sendHTML(chatID, "The payout account or amount is no longer valid.", userBackMenu())
 		return
 	}
@@ -518,10 +518,10 @@ func (a *App) handleWithdrawalAmountText(ctx context.Context, message *tgbotapi.
 	if flow.Step != "amount" {
 		return true
 	}
-	amount, err := strconv.ParseFloat(strings.ReplaceAll(strings.TrimSpace(message.Text), ",", "."), 64)
+	amount, amountOK := parsePositiveAmount(message.Text)
 	accountID, accountErr := strconv.ParseInt(flow.Data["account_id"], 10, 64)
 	account, lookupErr := a.store.WithdrawalAccount(ctx, a.botInstanceID, message.From.ID, accountID)
-	if err != nil || accountErr != nil || lookupErr != nil || amount <= 0 {
+	if !amountOK || accountErr != nil || lookupErr != nil {
 		a.sendHTML(message.Chat.ID, "Send a valid positive withdrawal amount.", flowCancelMenu("menu:withdraw"))
 		return true
 	}
@@ -625,7 +625,7 @@ func (a *App) handleNumberImportText(ctx context.Context, message *tgbotapi.Mess
 		pkr, err1 := strconv.ParseFloat(parts[0], 64)
 		usd, err2 := strconv.ParseFloat(parts[1], 64)
 		perCycle, err3 := strconv.Atoi(parts[2])
-		if err1 != nil || err2 != nil || err3 != nil || pkr < 0 || usd < 0 || perCycle <= 0 || perCycle > 1000 {
+		if err1 != nil || err2 != nil || err3 != nil || !store.ValidAmount(pkr) || !store.ValidAmount(usd) || perCycle <= 0 || perCycle > 1000 {
 			a.sendHTML(message.Chat.ID, "Prices must be non-negative and numbers-per-cycle must be 1–1000.", uploadPricingMenu())
 			return true
 		}
@@ -719,7 +719,7 @@ func (a *App) finishPanelWizard(ctx context.Context, chatID, userID int64, flow 
 		a.sendHTML(chatID, fmt.Sprintf("Panel limit reached for the <b>%s</b> tier (%d).", tier, store.TierPanelLimit(tier)), adminPanelMenu(nil))
 		return
 	}
-	config := map[string]any{}
+	var config map[string]any
 	switch flow.Data["kind"] {
 	case "login":
 		config = map[string]any{"base_url": flow.Data["url"], "username": flow.Data["username"], "password": flow.Data["password"]}

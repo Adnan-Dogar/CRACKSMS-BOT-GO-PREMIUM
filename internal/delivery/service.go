@@ -127,7 +127,6 @@ func (s *Service) worker(ctx context.Context, workerID int) {
 	}
 }
 
-func (s *Service) send(job domain.DeliveryJob) error { return s.sendContext(context.Background(), job) }
 func (s *Service) sendContext(ctx context.Context, job domain.DeliveryJob) error {
 	if s.store != nil && job.Event.SharedFromEventID != "" {
 		allowed, err := s.store.SharedDeliveryAllowed(ctx, job.Event.ID)
@@ -157,7 +156,38 @@ func (s *Service) sendContext(ctx context.Context, job domain.DeliveryJob) error
 		message.ReplyMarkup = themes.Keyboard(job.Event, job.ThemeID, links, exposeOTP, forUser)
 	}
 	_, err := bot.Send(message)
+	if customEmojiRejected(err) {
+		// A retired or unavailable custom emoji must not block the OTP itself:
+		// resend once with the plain fallback emoji and default button icons.
+		message.Text = customEmojiTag.ReplaceAllString(body, "")
+		if keyboard, ok := message.ReplyMarkup.(premium.InlineKeyboard); ok {
+			message.ReplyMarkup = withoutButtonIcons(keyboard)
+		}
+		_, err = bot.Send(message)
+	}
 	return err
+}
+
+var customEmojiTag = regexp.MustCompile(`</?tg-emoji\b[^>]*>`)
+
+func customEmojiRejected(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "custom emoji") || strings.Contains(text, "custom_emoji") || strings.Contains(text, "emoji_id_invalid") ||
+		strings.Contains(text, "document_invalid")
+}
+
+func withoutButtonIcons(keyboard premium.InlineKeyboard) premium.InlineKeyboard {
+	rows := make([][]premium.InlineButton, len(keyboard.InlineKeyboard))
+	for i, row := range keyboard.InlineKeyboard {
+		rows[i] = append([]premium.InlineButton(nil), row...)
+		for j := range rows[i] {
+			rows[i][j].IconCustomEmojiID = ""
+		}
+	}
+	return premium.InlineKeyboard{InlineKeyboard: rows}
 }
 
 func FormatMessage(event domain.OTPEvent, forUser bool) string {
@@ -203,6 +233,13 @@ func (s *Service) waitPerChat(ctx context.Context, chatID int64) {
 	if delay < 0 {
 		delay = 0
 	}
+	if len(s.chatAt) >= 4096 {
+		for id, at := range s.chatAt {
+			if now.After(at) {
+				delete(s.chatAt, id)
+			}
+		}
+	}
 	s.chatAt[chatID] = now.Add(delay + 50*time.Millisecond)
 	s.chatMu.Unlock()
 	if delay > 0 {
@@ -236,13 +273,6 @@ func classifyTelegramError(err error) (time.Duration, bool) {
 	permanent := strings.Contains(text, "bot was blocked") || strings.Contains(text, "chat not found") ||
 		strings.Contains(text, "not enough rights") || strings.Contains(text, "forbidden")
 	return 0, permanent
-}
-
-func defaultText(value, fallback string) string {
-	if strings.TrimSpace(value) == "" {
-		return fallback
-	}
-	return value
 }
 
 func sleep(ctx context.Context, duration time.Duration) bool {

@@ -175,9 +175,29 @@ func (s *Service) send(ctx context.Context, delivery domain.WebhookDelivery) (in
 	return resp.StatusCode, nil
 }
 
+// Special-purpose ranges that the net.IP helpers do not cover, including
+// carrier-grade NAT (used by some cloud metadata services) and NAT64, which
+// can translate to private IPv4 destinations.
+var reservedNetworks = func() []*net.IPNet {
+	var out []*net.IPNet
+	for _, cidr := range []string{"0.0.0.0/8", "100.64.0.0/10", "192.0.0.0/24", "198.18.0.0/15", "240.0.0.0/4", "64:ff9b::/96", "64:ff9b:1::/48"} {
+		_, network, _ := net.ParseCIDR(cidr)
+		out = append(out, network)
+	}
+	return out
+}()
+
 func safePublicIP(ip net.IP) bool {
-	return ip != nil && !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() &&
-		!ip.IsLinkLocalMulticast() && !ip.IsMulticast() && !ip.IsUnspecified()
+	if ip == nil || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return false
+	}
+	for _, network := range reservedNetworks {
+		if network.Contains(ip) {
+			return false
+		}
+	}
+	return true
 }
 
 func sleep(ctx context.Context, delay time.Duration) bool {
