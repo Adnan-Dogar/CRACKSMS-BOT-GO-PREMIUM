@@ -65,6 +65,9 @@ func buildCommandRegistry() []commandDefinition {
 		{"tutorialadd", "manage_tutorials", "admin:tutorial:add", "Add a tutorial", false}, {"tutorialremove", "manage_tutorials", "admin:tutorials", "Manage tutorials", false},
 		{"botinstances botapprove botreject bottoggle", "manage_bots", "admin:bots", "Manage child bot requests", true},
 		{"systemstats stats", "view_analytics", "admin:analytics", "View bot statistics", false},
+		{"user", "manage_tiers", "admin:user:find", "Look up a user profile", false},
+		{"ban unban", "manage_users", "admin:user:find", "Ban or unban a user", true},
+		{"addbalance", "manage_users", "admin:user:find", "Credit or debit a user balance", true},
 		{"patternadd", "manage_patterns", "admin:pattern:add", "Add an OTP extraction pattern", false},
 		{"patterns patternremove", "manage_patterns", "admin:patterns", "Manage OTP extraction patterns", false},
 	}

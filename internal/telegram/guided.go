@@ -337,7 +337,7 @@ func validateGuidedField(field guidedField, value string, location *time.Locatio
 			seen[n] = true
 		}
 	case "permissions":
-		allowed := map[string]bool{"*": true, "manage_panels": true, "manage_groups": true, "manage_rewards": true, "manage_withdrawals": true, "manage_bots": true, "manage_tutorials": true, "manage_patterns": true, "manage_admins": true, "manage_tiers": true, "manage_settings": true, "broadcast": true, "view_analytics": true}
+		allowed := map[string]bool{"*": true, "manage_panels": true, "manage_groups": true, "manage_rewards": true, "manage_withdrawals": true, "manage_bots": true, "manage_tutorials": true, "manage_patterns": true, "manage_admins": true, "manage_tiers": true, "manage_settings": true, "broadcast": true, "view_analytics": true, "manage_users": true}
 		for _, p := range strings.Split(value, ",") {
 			if !allowed[strings.TrimSpace(p)] {
 				return invalid()

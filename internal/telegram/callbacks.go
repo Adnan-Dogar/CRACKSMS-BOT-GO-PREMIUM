@@ -38,6 +38,17 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 	case "menu:mybots":
 		a.handleMyBots(ctx, chatID, userID)
 		return true
+	case "menu:mywithdrawals":
+		a.sendMyWithdrawals(ctx, chatID, userID)
+		return true
+	}
+	if strings.HasPrefix(data, "menu:ledger:") {
+		offset, err := strconv.Atoi(strings.TrimPrefix(data, "menu:ledger:"))
+		if err != nil || offset < 0 {
+			offset = 0
+		}
+		a.sendLedger(ctx, chatID, userID, offset, "menu:profile")
+		return true
 	}
 	if a.handleWithdrawalCallback(ctx, callback) {
 		return true
@@ -74,6 +85,9 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 	}
 
 	parts := strings.Split(data, ":")
+	if a.handleUserAdminCallback(ctx, callback, parts) {
+		return true
+	}
 	switch {
 	case data == "admin:numbers":
 		a.sendHTML(chatID, "📂 <b>Number Management</b>\n\nUpload inventory, inspect availability, and monitor assignment totals.", adminNumbersMenu())
@@ -84,7 +98,7 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 	case data == "admin:users":
 		a.sendAdminUsers(ctx, chatID)
 	case len(parts) == 4 && parts[1] == "user" && parts[2] == "view":
-		a.sendAdminUser(ctx, chatID, parts[3])
+		a.sendUserProfile(ctx, chatID, userID, parts[3])
 	case len(parts) == 5 && parts[1] == "user" && parts[2] == "tier":
 		target, ok := parseCallbackInt(parts[3])
 		if !ok {
@@ -95,7 +109,7 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 		if err != nil {
 			a.sendError(chatID, err)
 		} else {
-			a.sendHTML(chatID, "✅ User tier updated.", userTierMenu(target, parts[4]))
+			a.sendUserProfile(ctx, chatID, userID, strconv.FormatInt(target, 10))
 		}
 	case data == "admin:withdrawals":
 		a.sendAdminWithdrawals(ctx, chatID)
@@ -476,6 +490,8 @@ func adminCallbackPermission(data string) string {
 		return "manage_patterns"
 	case strings.HasPrefix(data, "admin:admin"):
 		return "manage_admins"
+	case strings.HasPrefix(data, "admin:user:ban"), strings.HasPrefix(data, "admin:user:balance"), strings.HasPrefix(data, "admin:user:ledger"):
+		return "manage_users"
 	case strings.HasPrefix(data, "admin:user"):
 		return "manage_tiers"
 	case data == "admin:broadcast":
@@ -523,26 +539,6 @@ inventory:
 		text.WriteString("\nNo inventory has been imported.")
 	}
 	a.sendHTML(chatID, text.String(), adminNumbersMenu())
-}
-
-func (a *App) sendAdminUser(ctx context.Context, chatID int64, rawID string) {
-	target, ok := parseCallbackInt(rawID)
-	if !ok {
-		a.sendHTML(chatID, "Invalid user ID.", adminUsersMenu(nil))
-		return
-	}
-	items, err := a.store.ListUsersForInstance(ctx, a.botInstanceID, 100)
-	if err != nil {
-		a.sendError(chatID, err)
-		return
-	}
-	for _, item := range items {
-		if item.UserID == target {
-			a.sendHTML(chatID, fmt.Sprintf("👤 <b>User %d</b>\n\nName: %s\nUsername: @%s\nTier: <b>%s</b>\nOTPs: <b>%d</b>\nBalance: <b>%.2f PKR</b>", item.UserID, html.EscapeString(item.FirstName), html.EscapeString(item.Username), html.EscapeString(item.Tier), item.TotalOTPs, item.BalancePKR), userTierMenu(item.UserID, item.Tier))
-			return
-		}
-	}
-	a.sendHTML(chatID, "User not found in this bot instance.", adminUsersMenu(items))
 }
 
 func (a *App) sendAdminWithdrawals(ctx context.Context, chatID int64) {

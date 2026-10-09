@@ -170,9 +170,15 @@ func (a *App) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 	}
 	blocked, blockErr := a.store.UserBlocked(ctx, message.From.ID)
 	if blockErr != nil || blocked {
+		if blocked && message.Chat.IsPrivate() && message.Command() == "start" {
+			a.sendHTML(message.Chat.ID, "🚫 <b>Account suspended</b>\n\nYour access to this bot has been suspended. Contact support if you think this is a mistake.", premium.InlineKeyboard{InlineKeyboard: [][]premium.InlineButton{}})
+		}
 		return
 	}
 	admin, _ := a.store.HasAnyAdminRole(ctx, a.botInstanceID, message.From.ID)
+	if a.maintenanceBlocked(ctx, message.Chat.ID, admin) {
+		return
+	}
 	if a.group != nil {
 		_ = a.syncGroupCommands(ctx, message.Chat.ID, message.From.ID)
 	}
@@ -439,6 +445,13 @@ func (a *App) handleWithdraw(ctx context.Context, message *tgbotapi.Message, arg
 		a.sendHTML(message.Chat.ID, "Withdrawal amount must be a positive number.", nil)
 		return
 	}
+	if minimum, err := a.withdrawalMinimum(ctx, "PKR"); err != nil {
+		a.sendError(message.Chat.ID, err)
+		return
+	} else if amount < minimum {
+		a.sendHTML(message.Chat.ID, fmt.Sprintf("The minimum withdrawal is <b>%.2f PKR</b>.", minimum), nil)
+		return
+	}
 	id, err := a.store.CreateWithdrawalForInstance(ctx, a.botInstanceID, message.From.ID, "PKR", amount, 0, parts[1])
 	if err != nil {
 		a.sendError(message.Chat.ID, err)
@@ -461,6 +474,9 @@ func (a *App) handleAdminCommand(ctx context.Context, message *tgbotapi.Message,
 			a.sendHTML(message.Chat.ID, "🚫 You do not have permission for this admin action.", nil)
 			return true
 		}
+	}
+	if a.handleUserAdminCommand(ctx, message, command, args) {
+		return true
 	}
 	switch command {
 	case "addgroup":
@@ -1034,6 +1050,12 @@ func (a *App) handleCallback(ctx context.Context, callback *tgbotapi.CallbackQue
 	}
 	chatID := callback.Message.Chat.ID
 	admin, _ := a.store.HasAnyAdminRole(ctx, a.botInstanceID, callback.From.ID)
+	if isNavigationCallback(callback.Data) {
+		a.screenChatID, a.screenMessageID = chatID, callback.Message.MessageID
+	}
+	if a.maintenanceBlocked(ctx, chatID, admin) {
+		return
+	}
 	if !admin && a.rateLimited(callback.From.ID) {
 		a.sendHTML(chatID, "Please slow down and try again.", userBackMenu())
 		return

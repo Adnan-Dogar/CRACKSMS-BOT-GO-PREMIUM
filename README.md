@@ -31,6 +31,9 @@ The behavioral baselines are [CRACKSMSBOTV2](https://github.com/Adnan-Dogar/CRAC
 - Encrypted panel configuration using AES-256-GCM.
 - Telegram premium custom-emoji IDs from all supplied baselines plus Bot API button styles (`primary`, `success`, and `danger`). Older Telegram clients may show normal fallback emoji/colors, while current clients receive the enhanced markup.
 - Protected health/readiness/metrics endpoints and graceful shutdown.
+- Admin User Manager: look up any user by ID or @username, ban/unban (main bot), credit or debit balances with a ledger entry, audit record and user notification, and change tiers from one profile card. The `manage_users` permission controls bans and balances.
+- Users see **Transactions** (every earning, reward, refund, withdrawal and admin adjustment) and **My Withdrawals** (status of each request with masked payout details) from My Account.
+- Configurable minimum withdrawal per currency and a **Maintenance mode** switch with a custom message; admins keep full access while regular users see the notice.
 
 The old repositories remain untouched and are used only as migration/behavioral references.
 
@@ -118,7 +121,14 @@ If you see an inventory menu from before this update, select the service again. 
 /addrequired chat_id|title|https://t.me/link
 /required
 /removerequired chat_id
+
+/user user_id or @username
+/ban user_id|reason
+/unban user_id
+/addbalance user_id|50 PKR|reason      (negative amount debits)
 ```
+
+Minimum withdrawal amounts and maintenance mode live under **Admin Dashboard → Settings**.
 
 Users can access premium integrations with:
 

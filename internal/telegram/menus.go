@@ -21,7 +21,8 @@ func profileMenu() premium.InlineKeyboard {
 	return premium.InlineKeyboard{InlineKeyboard: [][]premium.InlineButton{
 		{premium.Button("My Numbers", "tools:numbers:0", "primary", "phone"), premium.Button("Filter History", "tools:history:24h:all:0", "primary", "history")},
 		{premium.Button("My Stats", "menu:stats", "primary", "chart"), premium.Button("OTP History", "menu:history:0", "success", "history")},
-		{premium.Button("Withdraw", "menu:withdraw", "danger", "money"), premium.Button("Referral", "menu:referral", "success", "link")},
+		{premium.Button("Withdraw", "menu:withdraw", "danger", "money"), premium.Button("My Withdrawals", "menu:mywithdrawals", "primary", "withdraw")},
+		{premium.Button("Transactions", "menu:ledger:0", "primary", "history"), premium.Button("Referral", "menu:referral", "success", "link")},
 		{premium.Button("Leaderboard", "menu:top", "primary", "gold"), premium.Button("Main Menu", "menu:home", "primary", "phone")},
 	}}
 }
@@ -324,7 +325,8 @@ func adminUsersMenu(items []store.InstanceUser) premium.InlineKeyboard {
 		)})
 	}
 	rows = append(rows,
-		[]premium.InlineButton{premium.Button("Set User Tier", "admin:user:tier-help", "success", "premium"), premium.Button("Refresh", "admin:users", "primary", "chart")},
+		[]premium.InlineButton{premium.Button("Find User", "admin:user:find", "success", "search"), premium.Button("Set User Tier", "admin:user:tier-help", "primary", "premium")},
+		[]premium.InlineButton{premium.Button("Refresh", "admin:users", "primary", "chart")},
 		[]premium.InlineButton{premium.Button("Back", "menu:admin", "primary", "admin")},
 	)
 	return premium.InlineKeyboard{InlineKeyboard: rows}
