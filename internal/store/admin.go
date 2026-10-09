@@ -169,11 +169,18 @@ func (s *Store) RegisterReferral(ctx context.Context, userID, referrerID int64) 
 	}
 	defer tx.Rollback(ctx)
 	var exists bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE id=$1)`, referrerID).Scan(&exists); err != nil || !exists {
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE id=$1 AND NOT banned)`, referrerID).Scan(&exists); err != nil || !exists {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE users SET referred_by=$2 WHERE id=$1 AND referred_by IS NULL`, userID, referrerID); err != nil {
+	// Only fresh accounts can be referred, and never by someone they referred,
+	// so established users cannot hand out instant referral rewards.
+	tag, err := tx.Exec(ctx, `UPDATE users SET referred_by=$2 WHERE id=$1 AND referred_by IS NULL AND total_otps=0
+		AND NOT EXISTS(SELECT 1 FROM users r WHERE r.id=$2 AND r.referred_by=$1)`, userID, referrerID)
+	if err != nil {
 		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return nil
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO referrals(user_id,referrer_id) VALUES($1,$2) ON CONFLICT DO NOTHING`, userID, referrerID); err != nil {
 		return err

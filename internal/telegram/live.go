@@ -279,7 +279,8 @@ func (a *App) liveDocument(ctx context.Context, session liveSession) (screenDocu
 	fmt.Fprintf(&classic, "%s <b>%s</b>\n\nPeriod: <b>%s</b> · Received OTPs: <b>%d</b>\n", premium.Emoji(icon, "📊"), title, session.Period, snapshot.Total)
 	fmt.Fprintf(&rich, "<h2>%s %s</h2><p>Period: <b>%s</b> · Received OTPs: <b>%d</b></p>", premium.Emoji(icon, "📊"), title, session.Period, snapshot.Total)
 	rows := [][]premium.InlineButton{}
-	pages, total, page := 1, 0, session.Page
+	var pages int
+	total, page := 0, session.Page
 	if session.View == "private" {
 		assignments, e := a.store.LiveAssignments(ctx, a.botInstanceID, session.User)
 		if e != nil {

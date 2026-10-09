@@ -12,15 +12,15 @@ import (
 
 func (s *Store) ReplaceRewardSchedule(ctx context.Context, name string, userID *int64, rules []domain.RewardRule, createdBy int64) (int64, error) {
 	if len(rules) == 0 {
-		return 0, errors.New("at least one reward rule is required")
+		return 0, invalidInput("at least one reward rule is required")
 	}
 	seen := map[int]bool{}
 	for _, rule := range rules {
-		if rule.Threshold <= 0 || rule.MaxUsers < 0 || rule.AmountPKR < 0 || rule.AmountUSD < 0 || (rule.AmountPKR == 0 && rule.AmountUSD == 0) {
-			return 0, errors.New("reward threshold and amount must be positive; user limit cannot be negative")
+		if rule.Threshold <= 0 || rule.MaxUsers < 0 || !validAmount(rule.AmountPKR) || !validAmount(rule.AmountUSD) || (rule.AmountPKR == 0 && rule.AmountUSD == 0) {
+			return 0, invalidInput("reward threshold and amount must be positive; user limit cannot be negative")
 		}
 		if seen[rule.Threshold] {
-			return 0, fmt.Errorf("duplicate threshold %d", rule.Threshold)
+			return 0, invalidInput(fmt.Sprintf("duplicate threshold %d", rule.Threshold))
 		}
 		seen[rule.Threshold] = true
 	}
@@ -92,7 +92,7 @@ func (s *Store) ListRewardSchedules(ctx context.Context) ([]domain.RewardSchedul
 
 func (s *Store) DailySummaries(ctx context.Context, date time.Time) ([]DailySummary, error) {
 	dateText := date.In(s.location).Format("2006-01-02")
-	rows, err := s.pool.Query(ctx, `SELECT p.user_id,u.first_name,p.otp_count,p.base_earnings_pkr,p.reward_earnings_pkr
+	rows, err := s.pool.Query(ctx, `SELECT p.user_id,u.first_name,p.otp_count,p.base_earnings_pkr,p.reward_earnings_pkr,p.reward_earnings_usd
 		FROM user_daily_progress p JOIN users u ON u.id=p.user_id
 		WHERE p.local_date=$1 AND p.otp_count>0 ORDER BY p.otp_count DESC`, dateText)
 	if err != nil {
@@ -102,7 +102,7 @@ func (s *Store) DailySummaries(ctx context.Context, date time.Time) ([]DailySumm
 	var out []DailySummary
 	for rows.Next() {
 		var item DailySummary
-		if err := rows.Scan(&item.UserID, &item.Name, &item.OTPCount, &item.BasePKR, &item.RewardPKR); err != nil {
+		if err := rows.Scan(&item.UserID, &item.Name, &item.OTPCount, &item.BasePKR, &item.RewardPKR, &item.RewardUSD); err != nil {
 			return nil, err
 		}
 		out = append(out, item)
@@ -116,6 +116,7 @@ type DailySummary struct {
 	OTPCount  int
 	BasePKR   float64
 	RewardPKR float64
+	RewardUSD float64
 }
 
 func IsMissing(err error) bool { return errors.Is(err, pgx.ErrNoRows) }

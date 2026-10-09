@@ -38,6 +38,17 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 	case "menu:mybots":
 		a.handleMyBots(ctx, chatID, userID)
 		return true
+	case "menu:mywithdrawals":
+		a.sendMyWithdrawals(ctx, chatID, userID)
+		return true
+	}
+	if strings.HasPrefix(data, "menu:ledger:") {
+		offset, err := strconv.Atoi(strings.TrimPrefix(data, "menu:ledger:"))
+		if err != nil || offset < 0 {
+			offset = 0
+		}
+		a.sendLedger(ctx, chatID, userID, offset, "menu:profile")
+		return true
 	}
 	if a.handleWithdrawalCallback(ctx, callback) {
 		return true
@@ -74,6 +85,9 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 	}
 
 	parts := strings.Split(data, ":")
+	if a.handleUserAdminCallback(ctx, callback, parts) {
+		return true
+	}
 	switch {
 	case data == "admin:numbers":
 		a.sendHTML(chatID, "📂 <b>Number Management</b>\n\nUpload inventory, inspect availability, and monitor assignment totals.", adminNumbersMenu())
@@ -84,7 +98,7 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 	case data == "admin:users":
 		a.sendAdminUsers(ctx, chatID)
 	case len(parts) == 4 && parts[1] == "user" && parts[2] == "view":
-		a.sendAdminUser(ctx, chatID, parts[3])
+		a.sendUserProfile(ctx, chatID, userID, parts[3])
 	case len(parts) == 5 && parts[1] == "user" && parts[2] == "tier":
 		target, ok := parseCallbackInt(parts[3])
 		if !ok {
@@ -95,7 +109,7 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 		if err != nil {
 			a.sendError(chatID, err)
 		} else {
-			a.sendHTML(chatID, "✅ User tier updated.", userTierMenu(target, parts[4]))
+			a.sendUserProfile(ctx, chatID, userID, strconv.FormatInt(target, 10))
 		}
 	case data == "admin:withdrawals":
 		a.sendAdminWithdrawals(ctx, chatID)
@@ -149,6 +163,7 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 		if err := a.store.RemoveInstanceAdmin(ctx, a.botInstanceID, target); err != nil {
 			a.sendError(chatID, err)
 		} else {
+			_ = a.syncCommandMenu(ctx, target)
 			a.sendAdminList(ctx, chatID)
 		}
 	case data == "admin:required":
@@ -157,6 +172,8 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 		id, ok := parseCallbackInt(parts[3])
 		if ok {
 			a.sendHTML(chatID, "⚠️ <b>Remove this membership requirement?</b>", confirmationMenu(fmt.Sprintf("admin:required:deleteyes:%d", id), "admin:required"))
+		} else {
+			a.sendHTML(chatID, "This item is no longer available. Refresh the list and try again.", adminDashboard())
 		}
 	case len(parts) == 4 && parts[1] == "required" && parts[2] == "deleteyes":
 		id, ok := parseCallbackInt(parts[3])
@@ -175,6 +192,8 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 		id, ok := parseCallbackInt(parts[3])
 		if ok {
 			a.sendHTML(chatID, "⚠️ <b>Delete this OTP pattern?</b>", confirmationMenu(fmt.Sprintf("admin:pattern:deleteyes:%d", id), "admin:patterns"))
+		} else {
+			a.sendHTML(chatID, "This item is no longer available. Refresh the list and try again.", adminDashboard())
 		}
 	case len(parts) == 4 && parts[1] == "pattern" && parts[2] == "deleteyes":
 		id, ok := parseCallbackInt(parts[3])
@@ -227,6 +246,8 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 		id, ok := parseCallbackInt(parts[3])
 		if ok {
 			a.sendHTML(chatID, "⚠️ <b>Delete this panel?</b>\n\nIts encrypted configuration and queued raw ingest jobs will be removed. Existing accepted OTP history is retained.", confirmationMenu(fmt.Sprintf("admin:panel:deleteyes:%d", id), fmt.Sprintf("admin:panel:view:%d", id)))
+		} else {
+			a.sendHTML(chatID, "This item is no longer available. Refresh the list and try again.", adminDashboard())
 		}
 	case len(parts) == 4 && parts[1] == "panel" && parts[2] == "deleteyes":
 		id, ok := parseCallbackInt(parts[3])
@@ -289,6 +310,8 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 		id, ok := parseCallbackInt(parts[3])
 		if ok {
 			a.sendHTML(chatID, "⚠️ <b>Delete this OTP destination?</b>\n\nNew OTPs will no longer be delivered there.", confirmationMenu(fmt.Sprintf("admin:group:deleteyes:%d", id), fmt.Sprintf("admin:group:view:%d", id)))
+		} else {
+			a.sendHTML(chatID, "This item is no longer available. Refresh the list and try again.", adminDashboard())
 		}
 	case len(parts) == 4 && parts[1] == "group" && parts[2] == "deleteyes":
 		id, ok := parseCallbackInt(parts[3])
@@ -303,6 +326,33 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 		}
 	case data == "admin:rewards":
 		a.listRewards(ctx, chatID)
+	case data == "admin:reward:global":
+		a.sendRewardSchedule(ctx, chatID, nil)
+	case len(parts) == 4 && parts[1] == "reward" && parts[2] == "user":
+		target, ok := parseCallbackInt(parts[3])
+		if !ok {
+			a.sendHTML(chatID, "Invalid user ID.", adminRewardsMenu(nil))
+			break
+		}
+		a.sendRewardSchedule(ctx, chatID, &target)
+	case len(parts) == 4 && parts[1] == "reward" && parts[2] == "clear":
+		target, ok := parseCallbackInt(parts[3])
+		if !ok {
+			a.sendHTML(chatID, "Invalid user ID.", adminRewardsMenu(nil))
+			break
+		}
+		a.sendHTML(chatID, fmt.Sprintf("⚠️ <b>Remove the reward override for user %d?</b>\n\nThey will use the global schedule again.", target), confirmationMenu(fmt.Sprintf("admin:reward:clearyes:%d", target), fmt.Sprintf("admin:reward:user:%d", target)))
+	case len(parts) == 4 && parts[1] == "reward" && parts[2] == "clearyes":
+		target, ok := parseCallbackInt(parts[3])
+		if !ok {
+			a.sendHTML(chatID, "Invalid user ID.", adminRewardsMenu(nil))
+			break
+		}
+		if err := a.store.RemoveUserRewardOverride(ctx, target); err != nil {
+			a.sendError(chatID, err)
+		} else {
+			a.listRewards(ctx, chatID)
+		}
 	case strings.HasPrefix(data, "admin:reward:"):
 		a.sendHTML(chatID, "🎁 <b>Manage Reward Schedule</b>", integrationMenu("reward", "clearreward"))
 	case data == "admin:bots":
@@ -334,6 +384,7 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 	case len(parts) == 5 && parts[1] == "bot" && parts[2] == "otpshare":
 		id, ok := parseCallbackInt(parts[3])
 		if !ok {
+			a.sendHTML(chatID, "Invalid bot ID.", adminBotsMenu(nil))
 			break
 		}
 		if err := a.store.SetChildOTPSharing(ctx, userID, id, parts[4] == "1"); err != nil {
@@ -345,6 +396,8 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 		id, ok := parseCallbackInt(parts[3])
 		if ok {
 			a.sendHTML(chatID, "⚠️ <b>Reject this child-bot request?</b>", confirmationMenu(fmt.Sprintf("admin:bot:rejectyes:%d", id), fmt.Sprintf("admin:bot:view:%d", id)))
+		} else {
+			a.sendHTML(chatID, "This item is no longer available. Refresh the list and try again.", adminDashboard())
 		}
 	case len(parts) == 4 && parts[1] == "bot" && parts[2] == "rejectyes":
 		id, ok := parseCallbackInt(parts[3])
@@ -363,6 +416,8 @@ func (a *App) handleStyledCallback(ctx context.Context, callback *tgbotapi.Callb
 		id, ok := parseCallbackInt(parts[3])
 		if ok {
 			a.sendHTML(chatID, "⚠️ <b>Delete this tutorial?</b>", confirmationMenu(fmt.Sprintf("admin:tutorial:deleteyes:%d", id), "admin:tutorials"))
+		} else {
+			a.sendHTML(chatID, "This item is no longer available. Refresh the list and try again.", adminDashboard())
 		}
 	case len(parts) == 4 && parts[1] == "tutorial" && parts[2] == "deleteyes":
 		id, ok := parseCallbackInt(parts[3])
@@ -393,7 +448,7 @@ func (a *App) handleBuyCallback(ctx context.Context, callback *tgbotapi.Callback
 	if len(parts) == 3 && parts[1] == "service" {
 		for _, service := range store.SortedServices(catalog) {
 			if selectionKey(service) == parts[2] {
-				a.sendHTML(callback.Message.Chat.ID, fmt.Sprintf("📱 <b>%s countries</b>\n\nChoose a country below.", html.EscapeString(service)), countriesMenu(service, catalog[service]))
+				a.sendHTML(callback.Message.Chat.ID, countriesText(service, catalog[service]), countriesMenu(service, catalog[service]))
 				return
 			}
 		}
@@ -435,6 +490,8 @@ func adminCallbackPermission(data string) string {
 		return "manage_patterns"
 	case strings.HasPrefix(data, "admin:admin"):
 		return "manage_admins"
+	case strings.HasPrefix(data, "admin:user:ban"), strings.HasPrefix(data, "admin:user:balance"), strings.HasPrefix(data, "admin:user:ledger"):
+		return "manage_users"
 	case strings.HasPrefix(data, "admin:user"):
 		return "manage_tiers"
 	case data == "admin:broadcast":
@@ -464,37 +521,24 @@ func (a *App) sendAdminInventory(ctx context.Context, chatID int64) {
 		return
 	}
 	var text strings.Builder
-	text.WriteString("📂 <b>Inventory</b>\n")
-	for _, service := range store.SortedServices(catalog) {
+	stock, apps := catalogStock(catalog)
+	fmt.Fprintf(&text, "📂 <b>Inventory</b>\n\n<b>%d</b> numbers available · <b>%d</b> apps in stock\n", stock, apps)
+	services := store.SortedServices(catalog)
+inventory:
+	for i, service := range services {
 		fmt.Fprintf(&text, "\n<b>%s</b>\n", html.EscapeString(service))
 		for _, country := range catalog[service] {
-			fmt.Fprintf(&text, "• %s · %d available · %.2f PKR · %d/cycle\n", html.EscapeString(country.Country), country.Available, country.PricePKR, country.PerCycle)
+			if text.Len() > listTextBudget {
+				fmt.Fprintf(&text, "…list truncated; %d more apps not shown.\n", len(services)-i-1)
+				break inventory
+			}
+			fmt.Fprintf(&text, "• %s · %d available · %s · %d/cycle\n", html.EscapeString(country.Country), country.Available, priceLabel(country.PricePKR, country.PriceUSD), country.PerCycle)
 		}
 	}
 	if len(catalog) == 0 {
 		text.WriteString("\nNo inventory has been imported.")
 	}
 	a.sendHTML(chatID, text.String(), adminNumbersMenu())
-}
-
-func (a *App) sendAdminUser(ctx context.Context, chatID int64, rawID string) {
-	target, ok := parseCallbackInt(rawID)
-	if !ok {
-		a.sendHTML(chatID, "Invalid user ID.", adminUsersMenu(nil))
-		return
-	}
-	items, err := a.store.ListUsersForInstance(ctx, a.botInstanceID, 100)
-	if err != nil {
-		a.sendError(chatID, err)
-		return
-	}
-	for _, item := range items {
-		if item.UserID == target {
-			a.sendHTML(chatID, fmt.Sprintf("👤 <b>User %d</b>\n\nName: %s\nUsername: @%s\nTier: <b>%s</b>\nOTPs: <b>%d</b>\nBalance: <b>%.2f PKR</b>", item.UserID, html.EscapeString(item.FirstName), html.EscapeString(item.Username), html.EscapeString(item.Tier), item.TotalOTPs, item.BalancePKR), userTierMenu(item.UserID, item.Tier))
-			return
-		}
-	}
-	a.sendHTML(chatID, "User not found in this bot instance.", adminUsersMenu(items))
 }
 
 func (a *App) sendAdminWithdrawals(ctx context.Context, chatID int64) {
@@ -671,4 +715,41 @@ func (a *App) sendAdminTutorials(ctx context.Context, chatID int64) {
 		return
 	}
 	a.sendHTML(chatID, "📚 <b>Tutorial Manager</b>", adminTutorialsMenu(items))
+}
+
+func (a *App) sendRewardSchedule(ctx context.Context, chatID int64, userID *int64) {
+	schedules, err := a.store.ListRewardSchedules(ctx)
+	if err != nil {
+		a.sendError(chatID, err)
+		return
+	}
+	for _, schedule := range schedules {
+		if (userID == nil) != (schedule.UserID == nil) || (userID != nil && *userID != *schedule.UserID) {
+			continue
+		}
+		var text strings.Builder
+		target := "Global schedule"
+		if userID != nil {
+			target = fmt.Sprintf("Override for user %d", *userID)
+		}
+		fmt.Fprintf(&text, "🎁 <b>%s</b>\n\nSchedule: <b>#%d %s</b>\nActive since: <b>%s</b>\n", target, schedule.ID, html.EscapeString(schedule.Name), schedule.EffectiveFrom.Format("02 Jan 2006"))
+		for _, rule := range schedule.Rules {
+			amount := fmt.Sprintf("%.2f PKR", rule.AmountPKR)
+			if rule.AmountUSD > 0 {
+				amount = fmt.Sprintf("%.4f USD", rule.AmountUSD)
+			}
+			fmt.Fprintf(&text, "\n🏁 %d OTPs → <b>%s</b>", rule.Threshold, amount)
+			if rule.MaxUsers > 0 {
+				fmt.Fprintf(&text, " · first %d users", rule.MaxUsers)
+			}
+		}
+		rows := [][]premium.InlineButton{{premium.Button("Replace Schedule", "admin:reward:set", "success", "money")}}
+		if userID != nil {
+			rows = append(rows, []premium.InlineButton{premium.Button("Remove Override", fmt.Sprintf("admin:reward:clear:%d", *userID), "danger", "cancel")})
+		}
+		rows = append(rows, []premium.InlineButton{premium.Button("Back", "admin:rewards", "primary", "back"), premium.Button("Admin Home", "menu:admin", "primary", "home")})
+		a.sendHTML(chatID, text.String(), premium.InlineKeyboard{InlineKeyboard: rows})
+		return
+	}
+	a.sendHTML(chatID, "This reward schedule is no longer active.", adminRewardsMenu(schedules))
 }

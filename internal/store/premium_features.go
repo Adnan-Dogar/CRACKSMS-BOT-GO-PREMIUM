@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -143,10 +142,10 @@ func (s *Store) CompleteWebhookDelivery(ctx context.Context, delivery domain.Web
 
 func (s *Store) CreateScheduledMessage(ctx context.Context, message domain.ScheduledMessage) (int64, error) {
 	if message.TargetKind != "user" && message.TargetKind != "group" && message.TargetKind != "all_users" {
-		return 0, errors.New("target must be user, group, or all_users")
+		return 0, invalidInput("target must be user, group, or all_users")
 	}
 	if strings.TrimSpace(message.Body) == "" || !message.DeliverAt.After(time.Now()) {
-		return 0, errors.New("message body and a future delivery time are required")
+		return 0, invalidInput("message body and a future delivery time are required")
 	}
 	if message.ParseMode == "" {
 		message.ParseMode = "HTML"

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/adnan-dogar/cracksms-vnext/internal/premium"
@@ -71,15 +72,33 @@ func (s *Scheduler) runDailySummaries(ctx context.Context) {
 			continue
 		}
 		for _, summary := range summaries {
-			text := fmt.Sprintf("📊 <b>Daily Summary</b>\n\n📅 %s\n🔐 OTPs: <b>%d</b>\n💵 OTP earnings: <b>%.2f PKR</b>\n🎁 Rewards: <b>%.2f PKR</b>\n💰 Total: <b>%.2f PKR</b>",
-				date.Format("02 January 2006"), summary.OTPCount, summary.BasePKR, summary.RewardPKR,
-				summary.BasePKR+summary.RewardPKR)
-			message := tgbotapi.NewMessage(summary.UserID, premium.AnimateHTML(text))
+			message := tgbotapi.NewMessage(summary.UserID, premium.AnimateHTML(DailySummaryText(date, summary)))
 			message.ParseMode = tgbotapi.ModeHTML
 			if _, err := s.bot.Send(message); err != nil {
 				slog.Warn("daily summary delivery failed", "user_id", summary.UserID, "error", err)
 			}
-			time.Sleep(50 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(50 * time.Millisecond):
+			}
 		}
 	}
+}
+
+// DailySummaryText renders the end-of-day report, including USD rewards when
+// a limited USD milestone paid out that day.
+func DailySummaryText(date time.Time, summary store.DailySummary) string {
+	var text strings.Builder
+	fmt.Fprintf(&text, "📊 <b>Daily Summary</b>\n\n📅 Date: <b>%s</b>\n🔐 OTPs: <b>%d</b>\n💵 OTP earnings: <b>%.2f PKR</b>\n🎁 Rewards: <b>%.2f PKR</b>",
+		date.Format("02 January 2006"), summary.OTPCount, summary.BasePKR, summary.RewardPKR)
+	if summary.RewardUSD > 0 {
+		fmt.Fprintf(&text, "\n💲 USD rewards: <b>%.4f USD</b>", summary.RewardUSD)
+	}
+	fmt.Fprintf(&text, "\n💰 Total: <b>%.2f PKR</b>", summary.BasePKR+summary.RewardPKR)
+	if summary.RewardUSD > 0 {
+		fmt.Fprintf(&text, " + <b>%.4f USD</b>", summary.RewardUSD)
+	}
+	text.WriteString("\n\nKeep going — a new day of milestones has started!")
+	return text.String()
 }

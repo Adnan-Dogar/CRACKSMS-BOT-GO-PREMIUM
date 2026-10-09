@@ -40,7 +40,11 @@ func (a *App) sendWithdrawalMenu(ctx context.Context, chatID, userID int64) {
 		a.sendError(chatID, err)
 		return
 	}
-	text := fmt.Sprintf("💸 <b>Withdraw Funds</b>\n\nAvailable PKR: <b>%.2f</b>\nAvailable USDT: <b>%.4f</b>\n\n", pkr, usd)
+	text := fmt.Sprintf("💸 <b>Withdraw Funds</b>\n\nAvailable PKR: <b>%.2f</b>\nAvailable USDT: <b>%.4f</b>\n", pkr, usd)
+	if minPKR, minUSD, e := a.store.MinimumWithdrawal(ctx, a.botInstanceID); e == nil && (minPKR > 0 || minUSD > 0) {
+		text += fmt.Sprintf("Minimum: <b>%s PKR · %s USDT</b>\n", minimumLabel(minPKR, "PKR"), minimumLabel(minUSD, "USD"))
+	}
+	text += "\n"
 	if len(accounts) == 0 {
 		text += "Add a payout account first, then select it to submit a withdrawal."
 	} else {
@@ -125,10 +129,14 @@ func (a *App) confirmWithdrawal(ctx context.Context, callback *tgbotapi.Callback
 		return
 	}
 	accountID, err1 := strconv.ParseInt(flow.Data["account_id"], 10, 64)
-	amount, err2 := strconv.ParseFloat(flow.Data["amount"], 64)
+	amount, amountOK := parsePositiveAmount(flow.Data["amount"])
 	account, err3 := a.store.WithdrawalAccount(ctx, a.botInstanceID, userID, accountID)
-	if err1 != nil || err2 != nil || err3 != nil || amount <= 0 {
+	if err1 != nil || !amountOK || err3 != nil {
 		a.sendHTML(chatID, "The payout account or amount is no longer valid.", userBackMenu())
+		return
+	}
+	if minimum, minErr := a.withdrawalMinimum(ctx, withdrawalCurrency(account.Method)); minErr != nil || amount < minimum {
+		a.sendHTML(chatID, "The withdrawal minimum changed. Please start the request again.", userBackMenu())
 		return
 	}
 	amountPKR, amountUSD := amount, 0.0
@@ -449,6 +457,8 @@ func (a *App) handleFlowText(ctx context.Context, message *tgbotapi.Message, adm
 		return a.handleProviderText(ctx, message, flow)
 	case "ui_setting":
 		return a.handleSettingText(ctx, message, flow)
+	case "user_admin":
+		return a.handleUserAdminText(ctx, message, flow)
 	case "panel_source":
 		allowed, _ := a.store.HasAdminPermission(ctx, a.botInstanceID, message.From.ID, "manage_panels")
 		if !allowed {
@@ -518,10 +528,10 @@ func (a *App) handleWithdrawalAmountText(ctx context.Context, message *tgbotapi.
 	if flow.Step != "amount" {
 		return true
 	}
-	amount, err := strconv.ParseFloat(strings.ReplaceAll(strings.TrimSpace(message.Text), ",", "."), 64)
+	amount, amountOK := parsePositiveAmount(message.Text)
 	accountID, accountErr := strconv.ParseInt(flow.Data["account_id"], 10, 64)
 	account, lookupErr := a.store.WithdrawalAccount(ctx, a.botInstanceID, message.From.ID, accountID)
-	if err != nil || accountErr != nil || lookupErr != nil || amount <= 0 {
+	if !amountOK || accountErr != nil || lookupErr != nil {
 		a.sendHTML(message.Chat.ID, "Send a valid positive withdrawal amount.", flowCancelMenu("menu:withdraw"))
 		return true
 	}
@@ -536,6 +546,13 @@ func (a *App) handleWithdrawalAmountText(ctx context.Context, message *tgbotapi.
 	}
 	if amount > available {
 		a.sendHTML(message.Chat.ID, fmt.Sprintf("Insufficient balance. Available: <b>%.4f %s</b>.", available, withdrawalCurrency(account.Method)), flowCancelMenu("menu:withdraw"))
+		return true
+	}
+	if minimum, err := a.withdrawalMinimum(ctx, withdrawalCurrency(account.Method)); err != nil {
+		a.sendError(message.Chat.ID, err)
+		return true
+	} else if amount < minimum {
+		a.sendHTML(message.Chat.ID, fmt.Sprintf("The minimum withdrawal is <b>%s %s</b>. Send a larger amount.", formatMoney(minimum, strings.TrimSuffix(withdrawalCurrency(account.Method), "T")), withdrawalCurrency(account.Method)), flowCancelMenu("menu:withdraw"))
 		return true
 	}
 	flow.Step = "confirm"
@@ -625,7 +642,7 @@ func (a *App) handleNumberImportText(ctx context.Context, message *tgbotapi.Mess
 		pkr, err1 := strconv.ParseFloat(parts[0], 64)
 		usd, err2 := strconv.ParseFloat(parts[1], 64)
 		perCycle, err3 := strconv.Atoi(parts[2])
-		if err1 != nil || err2 != nil || err3 != nil || pkr < 0 || usd < 0 || perCycle <= 0 || perCycle > 1000 {
+		if err1 != nil || err2 != nil || err3 != nil || !store.ValidAmount(pkr) || !store.ValidAmount(usd) || perCycle <= 0 || perCycle > 1000 {
 			a.sendHTML(message.Chat.ID, "Prices must be non-negative and numbers-per-cycle must be 1–1000.", uploadPricingMenu())
 			return true
 		}
@@ -719,7 +736,7 @@ func (a *App) finishPanelWizard(ctx context.Context, chatID, userID int64, flow 
 		a.sendHTML(chatID, fmt.Sprintf("Panel limit reached for the <b>%s</b> tier (%d).", tier, store.TierPanelLimit(tier)), adminPanelMenu(nil))
 		return
 	}
-	config := map[string]any{}
+	var config map[string]any
 	switch flow.Data["kind"] {
 	case "login":
 		config = map[string]any{"base_url": flow.Data["url"], "username": flow.Data["username"], "password": flow.Data["password"]}
@@ -823,4 +840,13 @@ func maskValue(value string, prefix, suffix int) string {
 		return strings.Repeat("•", len(runes))
 	}
 	return string(runes[:prefix]) + "•••" + string(runes[len(runes)-suffix:])
+}
+
+// withdrawalMinimum returns the admin-configured minimum for a payout currency.
+func (a *App) withdrawalMinimum(ctx context.Context, currency string) (float64, error) {
+	pkr, usd, err := a.store.MinimumWithdrawal(ctx, a.botInstanceID)
+	if currency == "USDT" || currency == "USD" {
+		return usd, err
+	}
+	return pkr, err
 }

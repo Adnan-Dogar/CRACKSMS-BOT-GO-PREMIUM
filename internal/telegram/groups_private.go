@@ -87,7 +87,7 @@ func groupCallbackAllowed(route string) bool {
 		return false
 	}
 	switch route {
-	case "menu:admin", "menu:withdraw", "menu:api", "menu:webhooks", "menu:schedule", "menu:createbot", "menu:mybots", "menu:liveotp", "menu:myotps":
+	case "menu:admin", "menu:withdraw", "menu:api", "menu:webhooks", "menu:schedule", "menu:createbot", "menu:mybots", "menu:liveotp", "menu:myotps", "menu:mywithdrawals":
 		return false
 	}
 	return strings.HasPrefix(route, "menu:") || strings.HasPrefix(route, "buy:") || strings.HasPrefix(route, "tools:") || strings.HasPrefix(route, "prefs:") || strings.HasPrefix(route, "theme:") || strings.HasPrefix(route, "tutorial:") || strings.HasPrefix(route, "help:") || strings.HasPrefix(route, "activity:") || strings.HasPrefix(route, "live:") && !strings.Contains(route, "private") || strings.HasPrefix(route, "stats:") || route == "check_membership" || route == "ignore"

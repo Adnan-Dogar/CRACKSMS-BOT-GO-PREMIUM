@@ -46,8 +46,8 @@ func (a *App) showUserSettings(ctx context.Context, chat, user int64) {
 	if !pref.CompactMenu {
 		mode = "Full"
 	}
-	text := fmt.Sprintf("⚙️ <b>Your Settings</b>\n\n🎨 OTP theme: <b>T%d</b>\n🕓 Timezone: <b>%s</b>\n📋 Main menu: <b>%s</b>\n\nTap a preference to change it. Changes are saved for this bot.", theme, html.EscapeString(pref.Timezone), mode)
-	text += "\nDisplay: <b>" + html.EscapeString(pref.DisplayFormat) + "</b>"
+	text := fmt.Sprintf("⚙️ <b>Your Settings</b>\n\n🎨 OTP theme: <b>T%d · %s</b>\n🕓 Timezone: <b>%s</b>\n📋 Main menu: <b>%s</b>\n🖥 Display: <b>%s</b>\n\nTap a preference to change it. Changes are saved for this bot.",
+		theme, html.EscapeString(themes.Get(theme).Name), html.EscapeString(pref.Timezone), mode, html.EscapeString(capitalize(pref.DisplayFormat)))
 	menu := settingsMenu()
 	menu.InlineKeyboard = append([][]premium.InlineButton{{premium.Button("Compact Menu", "prefs:mode:compact", activeStyle(pref.CompactMenu), "list"), premium.Button("Full Menu", "prefs:mode:full", activeStyle(!pref.CompactMenu), "list")}, {premium.Button("Change Timezone", "prefs:timezone", "primary", "clock")}}, menu.InlineKeyboard...)
 	rows := [][]premium.InlineButton{}
@@ -80,13 +80,33 @@ func (a *App) showAdminSettings(ctx context.Context, chat int64) {
 	if limit > 0 {
 		label = fmt.Sprint(limit)
 	}
-	text := "⚙️ <b>Bot Settings</b>\n\nAssignment limit: <b>" + label + "</b>\n\nConfigure this bot's appearance and delivery defaults. Masked and hidden OTPs remain copyable when group buttons are enabled."
+	minPKR, minUSD, e := a.store.MinimumWithdrawal(ctx, a.botInstanceID)
+	if e != nil {
+		a.sendError(chat, e)
+		return
+	}
+	maintenance, maintenanceMessage, _ := a.store.Maintenance(ctx, a.botInstanceID)
+	text := "⚙️ <b>Bot Settings</b>\n\nAssignment limit: <b>" + label + "</b>" +
+		fmt.Sprintf("\nMinimum withdrawal: <b>%s PKR · %s USDT</b>", minimumLabel(minPKR, "PKR"), minimumLabel(minUSD, "USD")) +
+		"\nMaintenance mode: <b>" + onOff(maintenance) + "</b>"
+	if maintenance && maintenanceMessage != "" {
+		text += "\nMaintenance message: " + html.EscapeString(maintenanceMessage)
+	}
+	text += "\n\nConfigure this bot's appearance and delivery defaults. Masked and hidden OTPs remain copyable when group buttons are enabled."
 	for _, key := range []string{"group_url", "channel_url", "number_bot_url", "developer_url", "support_url"} {
 		if v, ok := values[key].(string); ok {
 			text += "\n" + html.EscapeString(strings.TrimSuffix(key, "_url")) + ": " + html.EscapeString(v)
 		}
 	}
+	maintenanceLabel, maintenanceStyle := "Maintenance: OFF", "primary"
+	if maintenance {
+		maintenanceLabel, maintenanceStyle = "Maintenance: ON", "danger"
+	}
 	menu := adminSettingsMenu()
+	menu.InlineKeyboard = append([][]premium.InlineButton{
+		{premium.Button(maintenanceLabel, "admin:setting:maintenance", maintenanceStyle, "settings"), premium.Button("Maintenance Message", "admin:setting:maintenance_message", "primary", "message")},
+		{premium.Button("Min Withdraw PKR", "admin:setting:min_withdraw_pkr", "primary", "withdraw"), premium.Button("Min Withdraw USDT", "admin:setting:min_withdraw_usd", "primary", "withdraw")},
+	}, menu.InlineKeyboard...)
 	menu.InlineKeyboard = append([][]premium.InlineButton{{premium.Button("Assignment Limit", "admin:setting:assignment_limit", "primary", "number"), premium.Button("Group Privacy", "admin:setting:privacy", "primary", "lock")}, {premium.Button("OTP Group Link", "admin:setting:group_url", "primary", "people"), premium.Button("Channel Link", "admin:setting:channel_url", "primary", "channel")}, {premium.Button("Number Bot Link", "admin:setting:number_bot_url", "primary", "bot")}, {premium.Button("Developer Link", "admin:setting:developer_url", "primary", "developer"), premium.Button("Support Link", "admin:setting:support_url", "primary", "support")}}, menu.InlineKeyboard...)
 	a.sendHTML(chat, text, menu)
 }
@@ -155,8 +175,25 @@ func (a *App) handleGUISettingsCallback(ctx context.Context, cb *tgbotapi.Callba
 			return true
 		}
 		key := strings.TrimPrefix(d, "admin:setting:")
+		if key == "maintenance" {
+			enabled, _, err := a.store.Maintenance(ctx, a.botInstanceID)
+			if err == nil {
+				err = a.store.SetInstanceSetting(ctx, a.botInstanceID, "maintenance", !enabled)
+			}
+			if err == nil {
+				_ = a.store.Audit(ctx, a.botInstanceID, cb.From.ID, "settings.maintenance", "bot_instance", fmt.Sprint(a.botInstanceID), map[string]bool{"enabled": !enabled})
+				a.showAdminSettings(ctx, cb.Message.Chat.ID)
+			} else {
+				a.sendError(cb.Message.Chat.ID, err)
+			}
+			return true
+		}
 		flow.Data["key"] = key
 		switch key {
+		case "maintenance_message":
+			prompt = "Send the message regular users see during maintenance (up to 300 characters), or none for the default."
+		case "min_withdraw_pkr", "min_withdraw_usd":
+			prompt = "Send the minimum amount per withdrawal request, or 0 to allow any amount."
 		case "assignment_limit":
 			prompt = "Send a number from 1 to 1000, or 0 to use service defaults."
 		case "privacy":
@@ -199,6 +236,22 @@ func (a *App) handleSettingText(ctx context.Context, m *tgbotapi.Message, flow s
 			}
 		case "privacy":
 			e = a.store.SetBotInstancePrivacy(ctx, a.botInstanceID, v)
+		case "maintenance_message":
+			if strings.EqualFold(v, "none") {
+				v = ""
+			}
+			if len([]rune(v)) > 300 {
+				e = fmt.Errorf("use up to 300 characters")
+			} else {
+				e = a.store.SetInstanceSetting(ctx, a.botInstanceID, key, v)
+			}
+		case "min_withdraw_pkr", "min_withdraw_usd":
+			n, err := strconv.ParseFloat(strings.ReplaceAll(v, ",", "."), 64)
+			if err != nil || !store.ValidAmount(n) || n > 1000000 {
+				e = fmt.Errorf("use a number from 0 to 1000000")
+			} else {
+				e = a.store.SetInstanceSetting(ctx, a.botInstanceID, key, n)
+			}
 		default:
 			if v == "none" {
 				v = ""
@@ -356,7 +409,7 @@ func (a *App) showBots(ctx context.Context, chat int64, status string, page int)
 	for _, pair := range [][]string{{"all", "pending"}, {"running", "stopped"}, {"error"}} {
 		row := []premium.InlineButton{}
 		for _, filter := range pair {
-			row = append(row, premium.Button(strings.Title(filter), fmt.Sprintf("admin:bots:filter:%s:0", filter), activeStyle(status == filter), "bot"))
+			row = append(row, premium.Button(capitalize(filter), fmt.Sprintf("admin:bots:filter:%s:0", filter), activeStyle(status == filter), "bot"))
 		}
 		rows = append(rows, row)
 	}
@@ -410,4 +463,11 @@ func helpTopicIcon(key string) string {
 		return "help"
 	}
 	return "book"
+}
+
+func minimumLabel(value float64, currency string) string {
+	if value <= 0 {
+		return "none"
+	}
+	return formatMoney(value, currency)
 }
